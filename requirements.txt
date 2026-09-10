@@ -1,0 +1,14 @@
+cltl.brain[service] @ git+https://github.com/leolani/cltl-knowledgerepresentation
+cltl.combot @ git+https://github.com/leolani/cltl-combot@main
+torch==2.2.2
+transformers==4.51.3
+pydantic
+openai
+sentence_transformers
+numpy
+scipy
+matplotlib
+#pygraphviz
+nltk==3.9.2
+flask
+flask-cors
