@@ -38,6 +38,25 @@ DEFAULT_OPENAI_TIMEOUT = 60.0
 # runs; self.turn_log itself is always populated regardless of this flag.
 LOG_TURNS = True
 
+# KgChatSession.__init__'s default `gap_activity_types` -- gap-finding (kg_gap_finder queries and
+# the follow-up questions built from them) only ever runs for an activity whose own type (the
+# Activity.type an extraction gave it -- see _annotate_and_push()/_is_gap_eligible_type()) is in
+# this set; anything else (an "other"/unclassified activity, or a type not meant to be probed for
+# gaps at all) is simply never queried. These are local names as they appear in the knowledge
+# graph's own rdf:type triples under the n2mu namespace (data_type.ActivityType's *values*, with
+# any space turned into an underscore -- e.g. "physical condition" -> "physical_condition" -- to
+# match events_to_capsules.py's own IRI-safe handling), not the Python enum's member names, which
+# occasionally differ (its "exercise" member is spelled correctly; a "excercise" typo here would
+# silently match nothing in the graph and exclude every real exercise activity from gap-finding).
+# Set before constructing KgChatSession -- e.g. pass a different tuple, or None to disable the
+# restriction entirely and consider every activity type -- there's no live control for this one
+# (unlike gap_threshold's slider in kg_chat_gui.py): which activity types are worth probing for
+# gaps is a modeling decision for the run, not something to flip mid-conversation.
+DEFAULT_GAP_ACTIVITY_TYPES = (
+    "exercise", "take_food", "take_drink", "symptom", "social_condition",
+    "mental_condition", "physical_condition", "treatment", "diet", "medication",
+)
+
 
 # --------------------------------------------------------------------------- #
 # Setup
@@ -376,6 +395,14 @@ class KgChatSession(ChatSession):
     right now. Read by kg_chat_gui.py's graph panel to know which activity to display/link to;
     of no interest if you're not driving this session through that GUI.
 
+    self.gap_activity_types (see DEFAULT_GAP_ACTIVITY_TYPES) restricts gap-finding to activities
+    of an allow-listed type -- a turn's own new subjects are still pushed to the graph and still
+    update self.last_subject_uris either way, but only the eligible ones (_is_gap_eligible_type())
+    are ever passed to _reply_from_gaps()/_fetch_gap_queue(), so an activity of some other type
+    never gets a gap-driven follow-up question. None disables the restriction (every type is
+    eligible). self._subject_types (subject_uri -> its type's local name, populated as a side
+    effect of _annotate_and_push()) is what that check reads.
+
     self.turn_log holds one diagnostic entry per turn (both the human's and the agent's, same
     turns/indexing as self.turns), each a
     {"turn", "speaker", "utterance", "triples_pushed", "gap_queries", "selected_gap"} dict:
@@ -395,7 +422,8 @@ class KgChatSession(ChatSession):
     """
 
     def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
-                 system_prompt=None, extractor=None, replier=None, gap_threshold=0.3, clear_all=False):
+                 system_prompt=None, extractor=None, replier=None, gap_threshold=0.3,
+                 gap_activity_types=DEFAULT_GAP_ACTIVITY_TYPES, clear_all=False):
         super().__init__(chat=chat, human=human, date=date, agent_fn=agent_fn, system_prompt=system_prompt)
         deps = _load_kg_dependencies()
         self._populate_ekg_from_annotations = deps["populate_ekg_from_annotations"]
@@ -410,6 +438,14 @@ class KgChatSession(ChatSession):
             backend="openai", timeout=DEFAULT_OPENAI_TIMEOUT
         )
         self.gap_threshold = gap_threshold
+        # None means "no restriction" (every activity type is gap-eligible); otherwise a set of
+        # local names -- see DEFAULT_GAP_ACTIVITY_TYPES/_is_gap_eligible_type().
+        self.gap_activity_types = None if gap_activity_types is None else set(gap_activity_types)
+        # subject_uri -> its activity type's local name, e.g. "take_food" -- populated as a side
+        # effect of _annotate_and_push() (only when the extraction actually carried a type), read
+        # by _is_gap_eligible_type(). Never removed, so it also still has the answer for a
+        # subject_uri from many turns ago.
+        self._subject_types = {}
         self.annotations = []
         self.kg_pushes = []
         self.reply_sources = []
@@ -486,7 +522,11 @@ class KgChatSession(ChatSession):
                 _, new_subjects, human_triples_pushed = self._annotate_and_push(human_turn)
                 if new_subjects:
                     self.last_subject_uris = new_subjects
-                reply = self._reply_from_gaps(new_subjects) if new_subjects else None
+                # last_subject_uris (above, for the graph panel) and triples_pushed cover EVERY
+                # new subject regardless of type; gap-finding itself only runs for the
+                # gap_activity_types-eligible ones -- see _is_gap_eligible_type().
+                gap_eligible_subjects = [u for u in new_subjects if self._is_gap_eligible_type(u)]
+                reply = self._reply_from_gaps(gap_eligible_subjects) if gap_eligible_subjects else None
                 source_tag = "gap" if reply is not None else "default"
                 if reply is None:
                     reply = _call_openai("generating the agent's reply", self.agent_fn, self._messages)
@@ -594,6 +634,18 @@ class KgChatSession(ChatSession):
             for extraction in entry["Output"]
             if extraction.activity and extraction.activity.activity_id
         ]
+        # For _is_gap_eligible_type() -- the local name as it actually appears in the graph's own
+        # rdf:type triples (events_to_capsules.py appends Activity.type.value as-is to the pushed
+        # type list, and downstream capsule/RDF building turns any space in it into an underscore
+        # the same way it does for every other label-derived URI, e.g. "physical condition" ->
+        # ".../n2mu/physical_condition"). Left unset (never a KEY in self._subject_types) when an
+        # extraction had no Activity.type at all -- _is_gap_eligible_type() treats that as NOT
+        # eligible, same as an explicitly out-of-list type.
+        for extraction in entry["Output"]:
+            activity = extraction.activity
+            if activity and activity.activity_id and activity.type:
+                uri = "http://cltl.nl/leolani/n2mu/" + activity.activity_id
+                self._subject_types[uri] = activity.type.value.replace(" ", "_")
         triples_pushed = [t for extraction in entry["Output"] for t in _extraction_log_triples(extraction)]
 
         # annotate_new_turn()'s "Output" is a list of SRLAnnotation Pydantic objects;
@@ -608,6 +660,17 @@ class KgChatSession(ChatSession):
         )
         self.kg_pushes.append(summary)
         return summary, subject_uris, triples_pushed
+
+    def _is_gap_eligible_type(self, subject_uri) -> bool:
+        """True if `subject_uri` may be used for gap-finding -- see self.gap_activity_types/
+        DEFAULT_GAP_ACTIVITY_TYPES. self.gap_activity_types is None means the restriction is
+        off (every subject is eligible); otherwise `subject_uri` must have a KNOWN type (recorded
+        in self._subject_types by _annotate_and_push()) that's in that set -- a subject whose
+        type was never captured at all (e.g. its extraction had no Activity.type) is NOT
+        eligible, same as one with an explicitly out-of-list type."""
+        if self.gap_activity_types is None:
+            return True
+        return self._subject_types.get(subject_uri) in self.gap_activity_types
 
     @staticmethod
     def _gap_key(gap: dict):
