@@ -1,0 +1,18 @@
+# Virtualenv
+.venv/
+
+# populate_ekg_from_annotations()'s step-wise graph logs -- default log_dir="kg_logs", but this
+# also matches "kg_logs2" etc. (a differently-named log_dir from a one-off run) at any depth in
+# the repo, not just the default name.
+kg_logs*/
+
+# Generated JSON output (e.g. notebooks/turns.json, notebooks/kg_turns.json from save_turns(),
+# kg_gap_finder.py's --json report, populate_ekg.py's capsules_out_path dump)
+*.json
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# macOS Finder metadata
+.DS_Store
