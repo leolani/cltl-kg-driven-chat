@@ -63,7 +63,7 @@ _prompt_conversational_srl_annotation_template = Template('''You are annotating 
                         "experiencer": [{"value": "I", "type": "person", "offset": 0, "length": 1}],
                         "participant": [], "qualification": [],
                         "instrument": [],
-                        "location": [{"value": "in my feet", "type": "other", "offset": 28, "length": 10}],
+                        "location": [{"value": "in my feet", "type": "body_part", "offset": 28, "length": 10}],
                         "result": [],
                         "time": [{"value": "lately", "offset": 39, "length": 6}],
                         "time_resolved": [{"time_expression": "lately", "temporal_type": "range", "absolute_date": null, "date_range_start": "2010-12-06", "date_range_end": "2010-12-13", "recurrence_pattern": null}]
@@ -81,7 +81,7 @@ _prompt_conversational_srl_annotation_template = Template('''You are annotating 
                         "experiencer": [{"value": "I", "type": "person", "offset": 0, "length": 1}],
                         "participant": [], "qualification": [],
                         "instrument": [],
-                        "location": [{"value": "toes", "type": "other", "offset": 74, "length": 4}],
+                        "location": [{"value": "toes", "type": "body_part", "offset": 74, "length": 4}],
                         "result": [],
                         "time": [{"value": "the past week", "offset": 42, "length": 13}],
                         "time_resolved": [{"time_expression": "the past week", "temporal_type": "range", "absolute_date": null, "date_range_start": "2010-12-06", "date_range_end": "2010-12-13", "recurrence_pattern": null}]
@@ -192,6 +192,25 @@ _prompt_conversational_srl_annotation_template = Template('''You are annotating 
                         "instrument": [], "location": [], "result": [],
                         "time": [{"value": "lately", "offset": 37, "length": 6}],
                         "time_resolved": []
+                    }
+                ]
+
+    Example 8 (sleep: "I" both goes to sleep and is the one sleeping, a self-affecting action, so agent_patient, not agent/patient; "6 hours" and "wasn't very restful" both qualify the sleep activity itself, so qualification, not a role on a person):
+        Input: {"chat": 11, "human": "Sam", "date": "2015,Jun,10", "turn": 1, "speaker": "Sam", "utterance": "I slept about 6 hours last night, but it wasn't very restful."}
+        Output: [
+                    {
+                        "perspective": {"emotion": "disappointment", "factuality": "confirm", "certainty": "certain"},
+                        "activity": {"value": "slept", "offset": 2, "length": 5, "type": "sleep", "activity_id": "chat11.1"},
+                        "agent": [], "patient": [],
+                        "agent_patient": [{"value": "I", "type": "person", "offset": 0, "length": 1}],
+                        "experiencer": [], "participant": [],
+                        "qualification": [
+                            {"value": "6 hours", "type": "other", "offset": 14, "length": 7},
+                            {"value": "wasn't very restful", "type": "other", "offset": 41, "length": 19}
+                        ],
+                        "instrument": [], "location": [], "result": [],
+                        "time": [{"value": "last night", "offset": 22, "length": 10}],
+                        "time_resolved": [{"time_expression": "last night", "temporal_type": "point", "absolute_date": "2015-06-09", "date_range_start": null, "date_range_end": null, "recurrence_pattern": null}]
                     }
                 ]
     <end of examples>

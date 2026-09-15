@@ -1,5 +1,5 @@
 [{
-  "activity_types": ["measurements"],
+  "activity_types": ["measurement"],
   "patient_type": ["body_function"],
   "patient_question": "Did you measure {patient_type} lately?",
   "activity_date": "date",

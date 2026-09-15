@@ -54,7 +54,8 @@ LOG_TURNS = True
 # gaps is a modeling decision for the run, not something to flip mid-conversation.
 DEFAULT_GAP_ACTIVITY_TYPES = (
     "exercise", "take_food", "take_drink", "symptom", "social_condition",
-    "mental_condition", "physical_condition", "treatment", "diet", "medication",
+    "mental_condition", "physical_condition", "treatment", "diet", "medication", "measurement",
+    "sleep",
 )
 
 

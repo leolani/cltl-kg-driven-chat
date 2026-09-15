@@ -12,6 +12,7 @@ from enum import Enum
 class ActivityType(str, Enum):
         exercise = "exercise"
         measurement = "measurement"
+        sleep = "sleep"
         take_food = "take_food"
         take_drink = "take_drink"
         take_medicine = "take_medicine"
@@ -88,6 +89,8 @@ class RoleType(str, Enum):
         outdoor = "outdoor"
         condition = "condition"
         activity = "activity"
+        body_part = "body_part"
+        body_function = "body_function"
         other = "other"
 
 

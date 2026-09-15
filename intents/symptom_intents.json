@@ -13,7 +13,7 @@
     "activity_qualification": ["duration", "degree"],
     "qualification_question": {
       "duration": "How long do you experience {activity}?",
-      "degree": "How strong do you experience {activity}?"
+      "degree": "How much do you experience {activity}?"
     },
     "secondary_objectives": {
       "activity_location": "body_part",
@@ -27,7 +27,7 @@
     "activity_labels": ["headache"],
     "qualification_question": {
       "duration": "How long do you experience {activity}?",
-      "degree": "How strong do you experience {activity}?"
+      "degree": "How much do you experience {activity}?"
     },
     "activity_qualification": ["duration", "degree"],
     "secondary_objectives": {
@@ -40,9 +40,22 @@
     "activity_labels": ["dizziness"],
     "qualification_question": {
       "duration": "How long do you experience {activity}?",
-      "degree": "How strong do you experience {activity}?"
+      "degree": "How much do you experience {activity}?"
     },
     "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
+    }
+  },
+    {
+    "activity_types": ["symptom"],
+    "activity_labels": ["pain"],
+    "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How much {activity} do you experience on a level from 1 to 10?"
+    },
     "secondary_objectives": {
       "activity_date": "date",
       "date_question":"When do you experience {activity}?"
