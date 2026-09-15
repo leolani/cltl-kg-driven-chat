@@ -956,10 +956,17 @@ class ChatWindow:
         radius = max(100, min(width, height) / 2 - center_r - node_r - 20)
         for i, (predicate, obj) in enumerate(drawable_triples):
             angle = (2 * math.pi * i / n) - (math.pi / 2)  # start straight up, go clockwise
-            nx = cx + radius * math.cos(angle)
-            ny = cy + radius * math.sin(angle)
+            dx, dy = math.cos(angle), math.sin(angle)
+            nx = cx + radius * dx
+            ny = cy + radius * dy
 
-            canvas.create_line(cx, cy, nx, ny, fill=GRAPH_EDGE_COLOR, width=1.5)
+            # Clipped to each node's own boundary (center_r/node_r out from its center), not the
+            # node centers themselves -- the center node's circle is drawn BEFORE this line, so a
+            # line running all the way to (cx, cy) would be painted on top of it, visibly cutting
+            # into the node instead of stopping at its edge.
+            edge_x0, edge_y0 = cx + center_r * dx, cy + center_r * dy
+            edge_x1, edge_y1 = nx - node_r * dx, ny - node_r * dy
+            canvas.create_line(edge_x0, edge_y0, edge_x1, edge_y1, fill=GRAPH_EDGE_COLOR, width=1.5)
             mx, my = (cx + nx) / 2, (cy + ny) / 2
             canvas.create_text(
                 mx, my, text=_truncate(_local_name(predicate), 18), fill=GRAPH_EDGE_LABEL_COLOR,

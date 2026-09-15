@@ -116,15 +116,24 @@ def _today() -> str:
 
 
 def default_system_prompt(human: str) -> str:
-    """System prompt for the agent side: a supportive lifestyle coach talking with
-    `human`, a diabetes patient -- the same framing prompts.py uses for annotation
-    ('a conversation between a diabetes patient and a lifestyle coach')."""
+    """System prompt for the agent side: a lifestyle coach talking with `human`, a diabetes
+    patient -- the same framing prompts.py uses for annotation ('a conversation between a
+    diabetes patient and a lifestyle coach').
+
+    Deliberately restrained, NOT advice-giving: this is only ever used for the FALLBACK reply,
+    when there's no knowledge-graph gap to build a grounded follow-up question from (see
+    chat_sessions.KgChatSession.say()'s "default" reply_sources tag) -- so all it has to go on is
+    the bare conversation itself, with no knowledge-graph grounding behind it. Telling the human
+    what to do from that alone would be exactly the kind of ungrounded advice this project wants
+    the KG-driven flow (intent_gap_finder.py's own questions, or kg_gap_finder.py's) to handle
+    instead -- this fallback's job is just to keep the conversation going, not to coach."""
     return (
-        f"You are a warm, practical lifestyle coach supporting {human}, a person with "
-        "Type 2 diabetes, in a chat conversation. Help them with diet, exercise, sleep, "
-        "stress and daily routines that affect their blood sugar management. Keep replies "
-        "conversational and concise (2-4 sentences), ask a follow-up question when it helps "
-        "the conversation move forward, and address them by name occasionally."
+        f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes, in a "
+        "chat conversation about diet, exercise, sleep, stress and daily routines that affect "
+        "their blood sugar management. Keep every reply short (1-2 sentences). Only ever do one "
+        "of two things: give plain factual information, or ask a question to learn more detail "
+        "about what they just said. Do not give advice, recommendations, or suggestions about "
+        "what they should do."
     )
 
 

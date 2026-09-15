@@ -326,9 +326,24 @@ class PromptProcessor():
         :param human: the name of the person chatting, if known. When `gap`'s predicate is
             `agent`/`agent_patient` (AGENT_PREDICATES) and `human` is given, this delegates to
             get_prompt_for_agent_gap() instead -- see there for why.
+
+        If `gap` carries a non-empty `question_template` (intent_gap_finder.py's own hand-
+        authored example question for this requirement, e.g. "What do you have for lunch?", with
+        {activity}/{patient} already filled in), that takes priority over everything else here:
+        the LLM is asked to paraphrase THAT question fluently (weaving in `known_context` --
+        see _format_known_context()) instead of inventing one from the bare subject/predicate/
+        type triple -- see get_instruct_for_templated_gap().
         """
         if human is not None and gap["predicate"] in AGENT_PREDICATES:
             return self.get_prompt_for_agent_gap(gap, human)
+
+        question_template = gap.get("question_template")
+        if question_template:
+            content = question_template
+            context_text = self._format_known_context(gap)
+            if context_text:
+                content += f". Already known about this same event: {context_text}"
+            return [self._instruct.get_instruct_for_templated_gap(), {"role": "user", "content": content}]
 
         subject_label = self._label_for_subject(gap)
         predicate_label = local_name(gap["predicate"])

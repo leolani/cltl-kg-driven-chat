@@ -502,6 +502,29 @@ def next_intent_gap(graph, subject_uri: str, intent: Dict, activity_type: Option
              symptom_intents.json/condition_intents.json/excercise_intents.json).
            - any other aspect -- a generic presence check on that aspect's own predicate
              (kg_gap_finder.NAMESPACE + aspect), displayed as `value`.
+         Any key ENDING in "_question" (e.g. "location_question", "date_question",
+         "qualification_question") is metadata, not a requirement of its own -- see
+         "Example questions" below -- and is skipped by this loop.
+
+    Example questions: an intent may give each requirement above its own hand-authored example
+    question in intents/*.json, so prompts.response_processor.get_prompt_for_kg_gap() can have
+    the LLM paraphrase THAT (see get_instruct_for_templated_gap()) instead of inventing a
+    question from the bare subject/predicate/type triple -- this is what actually fixes a weak
+    LLM backend leaking a raw role name (e.g. "patient") into the question:
+      - "patient_question" (sibling of "patient_type") -- "{activity}" filled in with the
+        activity's own label (e.g. "lunch").
+      - "qualification_question" (sibling of "activity_qualification") -- either one template
+        string that applies to every aspect, or a {aspect_name: template} mapping keyed by the
+        SPECIFIC aspect (e.g. "duration"/"degree") being asked about, when each needs its own
+        wording (see _question_for_aspect()). "{activity}" filled in as above.
+      - "date_question" (sibling of "activity_date") -- "{activity}" filled in as above.
+      - within "secondary_objectives", each requirement's own "{aspect}_question" sibling key
+        (e.g. "location_question" beside "activity_location", "qualification_question" beside
+        "*_qualification" -- this one may also use "{patient}", filled in with the ALREADY-KNOWN
+        patient's own label, e.g. "how much {patient} did you have?" -> "how much pizza did you
+        have?", since qualification is only ever asked once patient_type is already satisfied).
+    Any requirement without a matching template falls back to the plain triple-based question,
+    exactly as before this feature existed.
 
     `activity_type` (if given -- notebooks/chat_sessions.KgChatSession already tracks it in
     self._subject_types) is used only for the gap row's cosmetic "class" field; defaults to
@@ -510,44 +533,57 @@ def next_intent_gap(graph, subject_uri: str, intent: Dict, activity_type: Option
     cls_label = activity_type or " | ".join(intent.get("activity_types") or [])
     own_triples = _own_triples(graph, subject_uri)
     known_context = _known_context(graph, own_triples)
+    activity_label = _activity_label_from_triples(subject_uri, own_triples)
+    label_cache: Dict[str, str] = {}
 
     patient_type = intent.get("patient_type")
     if patient_type:
+        template = _render_question_template(intent.get("patient_question"), activity_label)
         gap = _predicate_object_type_gap(graph, subject_uri, cls_label, own_triples, "patient", patient_type,
-                                          known_context=known_context)
+                                          known_context=known_context, question_template=template)
         if gap:
             return gap, "predicate_object_type"
 
     primary_aspects = list(intent.get("activity_qualification") or [])
     if primary_aspects:
-        gap = _qualification_gap(subject_uri, cls_label, own_triples, primary_aspects, known_context=known_context)
+        gap = _qualification_gap(subject_uri, cls_label, own_triples, primary_aspects, known_context=known_context,
+                                  question_source=intent.get("qualification_question"), activity_label=activity_label)
         if gap:
             return gap, "predicate"
 
     time_predicates = [kg_gap_finder.NAMESPACE + "time/" + variant for variant in kg_gap_finder.TIME_PREDICATE_VARIANTS]
     if intent.get("activity_date"):
+        template = _render_question_template(intent.get("date_question"), activity_label)
         gap = _predicate_presence_gap(subject_uri, cls_label, own_triples, time_predicates, "date",
-                                       known_context=known_context)
+                                       known_context=known_context, question_template=template)
         if gap:
             return gap, "predicate"
 
-    for key, value in (intent.get("secondary_objectives") or {}).items():
+    secondary = intent.get("secondary_objectives") or {}
+    for key, value in secondary.items():
+        if key.endswith("_question"):
+            continue
         aspect = key.rsplit("_", 1)[-1]
         if aspect == "qualification":
+            patient_label = _patient_label(graph, own_triples, label_cache)
             gap = _qualification_gap(subject_uri, cls_label, own_triples, primary_aspects + [value],
-                                      known_context=known_context)
+                                      known_context=known_context, question_source=secondary.get("qualification_question"),
+                                      activity_label=activity_label, patient_label=patient_label)
             kind = "predicate"
         elif aspect == "location":
+            template = _render_question_template(secondary.get("location_question"), activity_label)
             gap = _predicate_object_type_gap(graph, subject_uri, cls_label, own_triples, "location", [value],
-                                              known_context=known_context)
+                                              known_context=known_context, question_template=template)
             kind = "predicate_object_type"
         elif aspect == "date":
+            template = _render_question_template(secondary.get("date_question"), activity_label)
             gap = _predicate_presence_gap(subject_uri, cls_label, own_triples, time_predicates, "date",
-                                           known_context=known_context)
+                                           known_context=known_context, question_template=template)
             kind = "predicate"
         else:
+            template = _render_question_template(secondary.get(f"{aspect}_question"), activity_label)
             gap = _predicate_presence_gap(subject_uri, cls_label, own_triples, kg_gap_finder.NAMESPACE + aspect, value,
-                                           known_context=known_context)
+                                           known_context=known_context, question_template=template)
             kind = "predicate"
         if gap:
             return gap, kind
