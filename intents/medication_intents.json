@@ -1,0 +1,10 @@
+[{
+  "activity_types": ["take_medication"],
+  "patient_type": ["medication"],
+  "activity_date": "date",
+  "secondary_objectives": {
+    "patient_qualification": "quantity"
+  }
+}
+]
+

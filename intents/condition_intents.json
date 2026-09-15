@@ -1,0 +1,35 @@
+[
+  {
+    "activity_types": ["physical_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_location": "place",
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["social_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_location": "place",
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["mental_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_location": "place",
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["economic_condition"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_location": "place",
+      "activity_date": "date"
+    }
+  }
+]
+

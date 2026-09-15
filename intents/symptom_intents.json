@@ -1,0 +1,32 @@
+[
+  {
+    "activity_types": ["blurry_vision"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["tinkling"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_location": "body_part",
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["headache"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_date": "date"
+    }
+  },
+  {
+    "activity_types": ["dizziness"],
+    "activity_qualification": ["duration", "degree"],
+    "secondary_objectives": {
+      "activity_date": "date"
+    }
+  }
+]
+
