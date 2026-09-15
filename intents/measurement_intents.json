@@ -1,0 +1,12 @@
+[{
+  "activity_types": ["measurements"],
+  "patient_type": ["body_function"],
+  "patient_question": "Did you measure {patient_type} lately?",
+  "activity_date": "date",
+  "date_question": "When did you {activity}?",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "What {patient_type} did you measure?"
+  }
+}
+]
