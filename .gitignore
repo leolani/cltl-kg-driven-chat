@@ -10,9 +10,15 @@ kg_logs*/
 # kg_gap_finder.py's --json report, populate_ekg.py's capsules_out_path dump)
 *.json
 
+# ...except intent definitions, which are hand-authored config, not generated output
+!intents/*.json
+
 # Python bytecode cache
 __pycache__/
 *.pyc
 
 # macOS Finder metadata
 .DS_Store
+
+# JetBrains IDE project config
+.idea/

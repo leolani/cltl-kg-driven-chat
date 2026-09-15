@@ -92,6 +92,33 @@ class Instruct():
         return instruct
 
 
+    def get_instruct_for_subject_gap_with_context(self):
+        """Same as get_instruct_for_subject_gap(), but the input also carries facts about this
+        SAME event that are already known (see prompts.response_processor._format_known_context()
+        -- currently populated only by intent_gap_finder.py's patient/date checks), so the
+        resulting question can naturally weave them in (e.g. mention "yesterday", address the
+        person as "you") instead of asking about them again -- and so a weaker LLM backend has
+        real material to build a natural question from instead of just the bare triple, which is
+        also how the raw predicate name (e.g. "patient") can otherwise leak into the question."""
+        instruct = {"role": "system", "content": "You are an intelligent assistant. \
+         I will give you as input: a triple with a subject, a predicate and a type of subject, \
+         followed by facts about this same event that are already known. \
+         You need to paraphrase the triple in plain " + self._language + " as a single natural \
+         question about the missing object only, naturally weaving in the already-known facts \
+         instead of asking about them again -- e.g. mention a known time like \"yesterday\", and \
+         address the person as \"you\" when they are already known to be the one who did it. \
+         Use who for the type person, where for the type location, when for the type time and what for everything else. \
+         Only reply with the short paraphrase of the input. \
+         When responding use the names or labels from the triple and be specific. \
+         Do not give an explanation. \
+         Do not explain what the subject and object is. \
+         Do not use the words agent, patient or experiencer in the paraphrase. \
+         Do not ask again about any fact already given as known. \
+         The response should be just the paraphrased text and nothing else."
+               }
+        return instruct
+
+
     def get_instruct_for_agent_confirmation(self):
         """Used by prompts.response_processor.get_prompt_for_agent_gap() for a gap on the
         `agent`/`agent_patient` role: instead of asking who did something (get_instruct_for_subject_gap()

@@ -1,32 +1,51 @@
 [
   {
-    "activity_types": ["blurry_vision"],
+    "activity_types": ["symptom"],
+    "activity_labels": ["blurry vision"],
     "activity_qualification": ["duration", "degree"],
     "secondary_objectives": {
       "activity_date": "date"
     }
   },
   {
-    "activity_types": ["tinkling"],
+    "activity_types": ["symptom"],
+    "activity_labels": ["tingling"],
     "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
     "secondary_objectives": {
       "activity_location": "body_part",
-      "activity_date": "date"
+      "location_question":"Where do you experience {activity}?",
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
     }
   },
   {
-    "activity_types": ["headache"],
+    "activity_types": ["symptom"],
+    "activity_labels": ["headache"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
     "activity_qualification": ["duration", "degree"],
     "secondary_objectives": {
-      "activity_date": "date"
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
     }
   },
   {
-    "activity_types": ["dizziness"],
+    "activity_types": ["symptom"],
+    "activity_labels": ["dizziness"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How strong do you experience {activity}?"
+    },
     "activity_qualification": ["duration", "degree"],
     "secondary_objectives": {
-      "activity_date": "date"
+      "activity_date": "date",
+      "date_question":"When do you experience {activity}?"
     }
   }
 ]
-

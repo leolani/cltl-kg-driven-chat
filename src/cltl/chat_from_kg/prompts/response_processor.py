@@ -281,6 +281,24 @@ class PromptProcessor():
             for example in examples
         )
 
+    def _format_known_context(self, gap: dict) -> str:
+        """Render a gap row's `known_context` (populated only by intent_gap_finder.py's
+        next_intent_gap() -- see its _known_context()) as a short phrase describing facts about
+        this SAME event that are already known, e.g. who did it and when. Fed into
+        get_prompt_for_kg_gap() so the resulting question can weave those in (e.g. "yesterday")
+        instead of asking about them again -- and so a weaker LLM backend has real material to
+        build a natural question from, instead of just the bare subject/predicate/type triple,
+        which is also how the raw predicate name (e.g. "patient") can end up leaking into the
+        question. Empty string if the row carries no known_context at all (e.g. a plain
+        kg_gap_finder.py row, which never sets this field)."""
+        context = gap.get("known_context") or {}
+        parts = []
+        if context.get("agent"):
+            parts.append("it was done by the person you're talking to -- address them as \"you\"")
+        if context.get("time"):
+            parts.append(f"it happened: {context['time']}")
+        return "; ".join(parts)
+
     def get_prompt_for_agent_gap(self, gap: dict, human: str):
         """Build a [instruct, user-message] prompt asking `human` to confirm they were the agent
         of `gap`'s subject, instead of the open "who did this" question get_prompt_for_kg_gap()
@@ -328,6 +346,12 @@ class PromptProcessor():
         if examples_text:
             gap_text += f". Examples from similar peers: {examples_text}"
             return [self._instruct.get_instruct_for_subject_gap_with_examples(), {"role": "user", "content": gap_text}]
+
+        context_text = self._format_known_context(gap)
+        if context_text:
+            gap_text += f". Already known about this same event: {context_text}"
+            return [self._instruct.get_instruct_for_subject_gap_with_context(), {"role": "user", "content": gap_text}]
+
         return [self._instruct.get_instruct_for_subject_gap(), {"role": "user", "content": gap_text}]
 
     #### Handling the human's ANSWER to a get_prompt_for_agent_gap() confirmation question --

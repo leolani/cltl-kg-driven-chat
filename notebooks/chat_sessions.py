@@ -325,6 +325,7 @@ def _load_kg_dependencies():
 
     sys.path.insert(0, str(chat_from_kg_dir))
     import kg_gap_finder
+    import intent_gap_finder
     from llm_triple_replier import LLMTripleReplier
     from prompts.response_processor import AGENT_PREDICATES
 
@@ -332,6 +333,7 @@ def _load_kg_dependencies():
         "LLM_EventExtraction": LLM_EventExtraction,
         "populate_ekg_from_annotations": populate_ekg_from_annotations,
         "kg_gap_finder": kg_gap_finder,
+        "intent_gap_finder": intent_gap_finder,
         "LLMTripleReplier": LLMTripleReplier,
         "AGENT_PREDICATES": AGENT_PREDICATES,
     }
@@ -446,6 +448,14 @@ class KgChatSession(ChatSession):
         # by _is_gap_eligible_type(). Never removed, so it also still has the answer for a
         # subject_uri from many turns ago.
         self._subject_types = {}
+        # subject_uri -> its activity's own label/phrase, e.g. "headache" -- populated the same
+        # way as self._subject_types (only when the extraction actually carried a non-empty
+        # `activity.value`, so a later phrase-less reference to an already-known activity never
+        # overwrites a real label with nothing). Unused by KgChatSession itself; read by
+        # KgIntentChatSession/intent_gap_finder.find_intent() to disambiguate between several
+        # intents that share one activity_type (e.g. several distinct symptoms, all typed
+        # "symptom" -- see intent_gap_finder.py's own module docstring).
+        self._subject_labels = {}
         self.annotations = []
         self.kg_pushes = []
         self.reply_sources = []
@@ -646,6 +656,14 @@ class KgChatSession(ChatSession):
             if activity and activity.activity_id and activity.type:
                 uri = "http://cltl.nl/leolani/n2mu/" + activity.activity_id
                 self._subject_types[uri] = activity.type.value.replace(" ", "_")
+            # self._subject_labels -- see its own comment in __init__. Only set when this
+            # extraction actually carried a phrase of its own: a later, phrase-less reference to
+            # an already-known activity (activity.value is None -- see
+            # events_to_capsules.get_triples_with_types_and_activity_id()'s own comment on this)
+            # must never overwrite an earlier real label with nothing.
+            if activity and activity.activity_id and activity.value:
+                uri = "http://cltl.nl/leolani/n2mu/" + activity.activity_id
+                self._subject_labels[uri] = activity.value
         triples_pushed = [t for extraction in entry["Output"] for t in _extraction_log_triples(extraction)]
 
         # annotate_new_turn()'s "Output" is a list of SRLAnnotation Pydantic objects;
@@ -891,3 +909,123 @@ class KgChatSession(ChatSession):
         # get_prompt_for_kg_gap() does NOT take the confirmation branch this time).
         prompt = self.replier._processor.get_prompt_for_kg_gap(gap, kind)
         return _call_openai("asking a follow-up question", self.replier.reply, prompt)
+
+
+# --------------------------------------------------------------------------- #
+# KgIntentChatSession
+# --------------------------------------------------------------------------- #
+
+class KgIntentChatSession(KgChatSession):
+    """A KgChatSession whose follow-up questions come from hand-authored intents (intents/*.json
+    at the project root, see chat_from_kg/intent_gap_finder.py) instead of kg_gap_finder's
+    peer-statistics-based gaps -- see kg_intent_chat.ipynb for the full per-turn flow.
+
+    kg_gap_finder's own gaps only fire once a MAJORITY of an activity's peers already have the
+    predicate in question, so the very first "take_food" activity ever pushed to the graph can
+    never produce one -- intents state what's expected directly, independent of how many similar
+    activities already exist, which is exactly why this exists as a separate session class
+    rather than just a different gap_activity_types/gap_threshold on KgChatSession.
+
+    Only _is_gap_eligible_type(), _fetch_gap_queue() and _print_log_entry() (for its
+    differently-shaped turn_log "gap_queries" entries -- no peer_coverage/threshold, since
+    there's no peer voting here) differ from KgChatSession; everything else -- annotating and
+    pushing turns to the graph, agent-confirmation handling, timeouts, the rest of turn_log --
+    is unchanged, since a filled-in intent gap is annotated back onto the graph exactly the same
+    way an ordinary kg_gap_finder gap's answer is (the human's plain-text reply to the follow-up
+    question runs through the normal incremental extractor next turn -- see the class docstring
+    on cross-turn coreference); nothing here needs its own push path.
+
+    self.intents holds the loaded intent definitions (see intent_gap_finder.load_intents()) --
+    an activity type NOT covered by any of them (intent_gap_finder.find_intent() returns None)
+    is simply never gap-driven: its turns are still annotated/pushed to the graph like any
+    other, but the agent's reply for it always falls back to the plain LLM agent_fn -- "if there
+    is no intent match, use the LLM response". This includes the case where several intents
+    share one activity_type (see this project's own symptom_intents.json, where several
+    different symptoms all share the generic "symptom" ActivityType) but the activity's own
+    label -- self._subject_labels, inherited from KgChatSession -- doesn't match any of the
+    matching intents' "activity_labels": find_intent() deliberately treats that as no match too,
+    rather than guessing one of them (see its own docstring).
+    """
+
+    def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
+                 system_prompt=None, extractor=None, replier=None, intents=None, intents_dir=None,
+                 clear_all=False):
+        """Same parameters as KgChatSession, minus gap_threshold/gap_activity_types (not
+        meaningful here -- there's no peer voting, and eligibility is decided by intent match,
+        not an allow-list), plus:
+
+        intents      -- pre-loaded list of intent dicts (see intent_gap_finder.load_intents()).
+                         Loaded from `intents_dir` (or the project's own intents/ folder, if
+                         `intents_dir` is also omitted) when not given.
+        intents_dir  -- directory of intent *.json files, passed to
+                         intent_gap_finder.load_intents() when `intents` isn't given directly.
+        """
+        super().__init__(
+            chat=chat, human=human, kg_address=kg_address, log_dir=log_dir, date=date,
+            agent_fn=agent_fn, system_prompt=system_prompt, extractor=extractor, replier=replier,
+            gap_threshold=0.0, gap_activity_types=None, clear_all=clear_all,
+        )
+        # There's no peer voting here (see the class docstring), so gap_threshold is never read
+        # by anything this class actually does -- dropped, not just left at 0.0, so
+        # kg_chat_gui.py's ChatWindow (which shows its "Gap sensitivity" slider purely based on
+        # hasattr(session, "gap_threshold")) doesn't offer a control that would silently do
+        # nothing for this session type.
+        del self.gap_threshold
+        deps = _load_kg_dependencies()
+        self._intent_gap_finder = deps["intent_gap_finder"]
+        self.intents = intents if intents is not None else self._intent_gap_finder.load_intents(intents_dir)
+
+    def _is_gap_eligible_type(self, subject_uri) -> bool:
+        """Overrides KgChatSession's allow-list check: eligible exactly when
+        intent_gap_finder.find_intent() finds a matching intent for this subject's activity type
+        (and, if several intents share that type, its own label -- e.g. several distinct
+        symptoms all typed "symptom") -- see the class docstring's "no intent match -> LLM"
+        fallback."""
+        activity_type = self._subject_types.get(subject_uri)
+        activity_label = self._subject_labels.get(subject_uri)
+        return self._intent_gap_finder.find_intent(activity_type, self.intents, activity_label=activity_label) is not None
+
+    def _fetch_gap_queue(self, subject_uri):
+        """Overrides KgChatSession's kg_gap_finder-based version: runs
+        intent_gap_finder.next_intent_gap() for the one intent matching this subject's activity
+        type/label (guaranteed to exist -- say() only calls this for
+        _is_gap_eligible_type()-eligible subjects) instead of a peer-statistics kg_gap_finder
+        query. An intent's own checks already run in priority order and stop at the first unmet
+        one (see next_intent_gap()'s docstring), so the "queue" this returns is always length 0
+        or 1 -- _next_gap() drains it exactly the same way regardless."""
+        activity_type = self._subject_types.get(subject_uri)
+        activity_label = self._subject_labels.get(subject_uri)
+        intent = self._intent_gap_finder.find_intent(activity_type, self.intents, activity_label=activity_label)
+        found = []
+        if intent is not None:
+            graph = self._kg_gap_finder.load_graph_from_endpoint(self.kg_address)
+            next_gap = self._intent_gap_finder.next_intent_gap(graph, subject_uri, intent, activity_type=activity_type)
+            if next_gap is not None:
+                found = [next_gap]
+        found = [(g, kind) for g, kind in found if self._gap_key(g) not in self._asked_gap_keys]
+        self._pending_gap_queries.append({
+            "subject": subject_uri,
+            "activity_type": activity_type,
+            "intent_source": intent.get("_source_file") if intent else None,
+            "after_dedup": len(found),
+        })
+        return found
+
+    @staticmethod
+    def _print_log_entry(entry: dict) -> None:
+        """Like KgChatSession._print_log_entry(), but for this class's own "gap_queries" entry
+        shape (subject/activity_type/intent_source/after_dedup -- no peer-voting fields to show,
+        since there's no peer comparison here)."""
+        print(f"[turn {entry['turn']}] {entry['speaker']}: {entry['utterance']}")
+        if entry["triples_pushed"]:
+            print(f"    pushed {len(entry['triples_pushed'])} triple(s):")
+            for t in entry["triples_pushed"]:
+                print(f"      {t['subject']}  {t['predicate']}  =  {t['object']}")
+        for q in entry["gap_queries"]:
+            print(
+                f"    intent gap query: subject={q['subject']} activity_type={q['activity_type']} "
+                f"intent={q['intent_source']} after_dedup={q['after_dedup']}"
+            )
+        if entry["selected_gap"]:
+            g = entry["selected_gap"]
+            print(f"    selected gap: subject={g['subject']} predicate={g['predicate']} kind={g['kind']}")

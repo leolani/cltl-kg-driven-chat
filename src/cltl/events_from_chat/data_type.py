@@ -76,6 +76,8 @@ class RoleType(str, Enum):
         organization = "organization"
         object = "object"
         substance = "substance"
+        food = "food"
+        drink = "drink"
         medication = "medication"
         vehicle = "vehicle"
         tool = "tool"
