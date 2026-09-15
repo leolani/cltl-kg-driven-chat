@@ -38,10 +38,10 @@ _prompt_conversational_srl_annotation_template = Template('''You are annotating 
     - agent_patient: use INSTEAD of agent and patient when a single participant both controls the activity and undergoes the change it causes (a self-affecting action), e.g. "John cycles" -> agent_patient: John, NOT agent: John plus patient: John.
     - experiencer: the participant that experiences a state or condition, with no change of state and no separate agent causing it, e.g. "John has a headache" -> experiencer: John. Use experiencer instead of patient for a participant merely experiencing a condition.
     - participant: use ONLY for a participant in the activity that cannot properly be captured by agent, patient, agent_patient, or experiencer above -- e.g. a bystander or another party involved without controlling the activity or undergoing its change of state themselves.
-    - qualification: a specific qualification of the activity or condition itself (not of a participant), e.g. "blood sugar levels are high" -> qualification: high.
+    - qualification: a specific qualification of the activity or condition itself (not of a participant), e.g. "blood sugar levels are high" -> qualification: high. This INCLUDES how LONG the activity or condition itself lasted/took (its duration, e.g. "for 20 minutes", "for an hour", "for three days") -- duration is a qualification of the activity/condition, never a time role (see time/time_resolved below), even though it is phrased with a time span.
     - agent, patient, agent_patient, experiencer, participant, qualification, instrument, location: arrays of {"value": <verbatim phrase>, "type": <role_type>, "offset": <int>, "length": <int>}, where role_type is one of $role_type_values.
     - result: array of {"value": <verbatim phrase>, "type": <result_type>, "offset": <int>, "length": <int>}, where result_type is one of $result_type_values.
-    - time: array of {"value": <verbatim phrase>, "offset": <int>, "length": <int>}.
+    - time: array of {"value": <verbatim phrase>, "offset": <int>, "length": <int>}. Only for WHEN the activity/condition happened, started, or recurs (e.g. "today", "yesterday", "every morning", "lately") -- NEVER for how long it lasted, which is a qualification (see above). A single utterance can and often does have both, as two separate roles, e.g. "I walked for 20 minutes today" -> qualification: "for 20 minutes" (duration), time: "today" (when).
     - time_resolved: array of {"time_expression": <verbatim phrase matching a "time" entry>, "temporal_type": <temporal_type>, "absolute_date": <"YYYY-MM-DD" or null>, "date_range_start": <"YYYY-MM-DD" or null>, "date_range_end": <"YYYY-MM-DD" or null>, "recurrence_pattern": <recurrence_pattern or null>}, grounding each time expression to a calendar date using the conversation's date as the reference point. temporal_type is one of $temporal_type_values. recurrence_pattern is one of $recurrence_pattern_values when the time expression clearly recurs on one of those patterns, otherwise null (e.g. "twice daily" is best captured as recurrence_pattern "daily" plus the free-text time value "twice daily").
 
     Every "offset" and "length" MUST be computed against the "utterance" text of the MOST RECENT user message only (0-indexed character offset, length in characters) — never against an earlier turn's utterance, and never against the surrounding JSON of the message itself. 
@@ -211,6 +211,22 @@ _prompt_conversational_srl_annotation_template = Template('''You are annotating 
                         "instrument": [], "location": [], "result": [],
                         "time": [{"value": "last night", "offset": 22, "length": 10}],
                         "time_resolved": [{"time_expression": "last night", "temporal_type": "point", "absolute_date": "2015-06-09", "date_range_start": null, "date_range_end": null, "recurrence_pattern": null}]
+                    }
+                ]
+
+    Example 9 (duration vs. time: "for 20 minutes" says how LONG the walk lasted, so it is a qualification of the "walked" activity, NOT a time role, even though it is phrased with a time span; "today" says WHEN the walk happened, so that one -- and only that one -- is the time role):
+        Input: {"chat": 12, "human": "Leo", "date": "2016,Apr,03", "turn": 1, "speaker": "Leo", "utterance": "I walked for 20 minutes today"}
+        Output: [
+                    {
+                        "perspective": {"emotion": "neutral", "factuality": "confirm", "certainty": "certain"},
+                        "activity": {"value": "walked", "offset": 2, "length": 6, "type": "exercise", "activity_id": "chat12.1"},
+                        "agent": [], "patient": [],
+                        "agent_patient": [{"value": "I", "type": "person", "offset": 0, "length": 1}],
+                        "experiencer": [], "participant": [],
+                        "qualification": [{"value": "20 minutes", "type": "other", "offset": 13, "length": 10}],
+                        "instrument": [], "location": [], "result": [],
+                        "time": [{"value": "today", "offset": 24, "length": 5}],
+                        "time_resolved": [{"time_expression": "today", "temporal_type": "point", "absolute_date": "2016-04-03", "date_range_start": null, "date_range_end": null, "recurrence_pattern": null}]
                     }
                 ]
     <end of examples>
