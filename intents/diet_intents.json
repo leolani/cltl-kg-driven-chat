@@ -1,0 +1,18 @@
+[{
+  "activity_types": ["take_food"],
+  "patient_type": ["food"],
+  "activity_date": "date",
+  "secondary_objectives": {
+    "patient_qualification": "quantity"
+  }
+},
+{
+  "activity_types": ["take_drink"],
+  "patient_type": ["drink"],
+  "activity_date": "date",
+  "secondary_objectives": {
+    "patient_qualification": "quantity"
+  }
+}
+]
+

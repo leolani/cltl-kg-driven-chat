@@ -1,0 +1,10 @@
+[{
+  "activity_types": ["excercise"],
+  "activity_qualification": ["duration"],
+  "secondary_objectives": {
+    "activity_location": "place",
+    "activity_date": "date"
+  }
+}
+]
+
