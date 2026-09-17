@@ -5,6 +5,39 @@ from datetime import datetime
 from cltl.brain.long_term_memory import LongTermMemory
 from cltl.commons.discrete import Certainty, Polarity, Sentiment, Emotion, GoEmotion
 
+
+def _parse_event_time(value: str):
+    """One event's own time value (a resource URI whose local name is a timestamp, or a plain
+    literal) turned into a datetime, or None if it isn't a parseable date/time at all. Handles
+    both the real KG's own ISO 8601 "YYYY-MM-DDTHH:MM:SS" local name (the standard "T" date/time
+    separator -- what n2mu:time/dateTime etc. actually resolve to once n2mu_sem_roles.py's
+    rdfs:subPropertyOf mapping lets get_sem_relation_query() see them at all) and the older,
+    underscore-separated "YYYY-MM-DD_HH:MM:SS" convention some of this project's own synthetic
+    test-data generators (see thought_util.get_event_gaps_for_period()) still produce.
+
+    Returns None (rather than raising) when neither format matches -- events_from_chat's own SRL
+    extractor stores whatever "time" a turn actually mentioned under this same n2mu:time/*
+    predicate group whether or not it was ever resolved to a real calendar date, so a value like
+    "for an hour", "yesterday" or "in the morning" (turned into "for_an_hour" etc. by the same
+    space-to-underscore handling every other label-derived URI gets -- see
+    notebooks/chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES's own comment on that) is an entirely
+    normal, expected value here, not a malformed date to raise over. The caller
+    (get_temporal_containers()/get_temporal_container_for_agent()) simply has no date to go on
+    from THIS particular time value when this returns None -- the activity still lands in the
+    "unknown" bucket if none of its time triples resolve to a real date, exactly as if it had no
+    time value asserted at all.
+    """
+    local_name = value.rsplit("/", 1)[-1]
+    try:
+        return datetime.fromisoformat(local_name)
+    except ValueError:
+        pass
+    try:
+        return datetime.strptime(local_name, "%Y-%m-%d_%H:%M:%S")
+    except ValueError:
+        return None
+
+
 def get_last_conversation_date (target:str, brain:LongTermMemory, current_date:datetime, fixed_previous_date:datetime):
     #### We get all utterances to get the date of the previous encounter
     query = util.get_all_utterances(target)
@@ -77,12 +110,9 @@ def get_temporal_containers (brain:LongTermMemory, current_date:datetime, recent
                 event_location = sem['place_id']['value']
                 event_location = event_location[event_location.rindex("/")+1:]
             if 'time_id' in sem:
-                time = sem['time_id']['value']
-                start=time.rindex('/')+1
-                event_date = datetime.strptime(time[start:], '%Y-%m-%d_%H:%M:%S')
-                ### To remove the time use the next code instead
-                #end = time.rindex('_')
-                #event_date = datetime.strptime(time[start:end], '%Y-%m-%d')
+                parsed_time = _parse_event_time(sem['time_id']['value'])
+                if parsed_time is not None:
+                    event_date = parsed_time
 
         #### Get perspectives
         emotion = GoEmotion.NEUTRAL
@@ -209,13 +239,9 @@ def get_temporal_container_for_agent (brain:LongTermMemory, agent:"carl", activi
                 event_location = srl['place_id']['value']
                 event_location = event_location[event_location.rindex("/")+1:]
             if 'time_id' in srl:
-                time = srl['time_id']['value']
-                event_date = datetime.strptime(time, '%Y-%m-%d %H:%M:%S')
-                #start=time.rindex('/')+1
-                #event_date = datetime.strptime(time[start:], '%Y-%m-%d_%H:%M:%S')
-                ### To remove the time use the next code instead
-                #end = time.rindex('_')
-                #event_date = datetime.strptime(time[start:end], '%Y-%m-%d')
+                parsed_time = _parse_event_time(srl['time_id']['value'])
+                if parsed_time is not None:
+                    event_date = parsed_time
 
         #### Get perspectives
         emotion = GoEmotion.NEUTRAL

@@ -199,6 +199,46 @@ class Instruct():
         return instruct
 
 
+    def get_instruct_for_intent_answer_response(self):
+        """Used by prompts.response_processor.get_prompt_for_intent_answer_response() to
+        classify a human's reply to an intent-driven follow-up question (see
+        intent_gap_finder.next_intent_gap()) -- see
+        chat_sessions.KgChatSession._classify_intent_answer_reply(), which parses the exact
+        three-way output contract described here. Unlike get_instruct_for_confirmation_response()
+        (a yes/no question specifically), this question could be answered with any short phrase
+        (e.g. "yoghurt with fresh fruit", "30 minutes"), so the UNRELATED case matters here in a
+        way it doesn't there -- a reply that neither answers nor declines (e.g. a clarifying
+        question back, or a change of subject) must never be pushed as if it were the answer."""
+        instruct = {"role": "system", "content": "You are an intelligent assistant. \
+         I will give you a question that was asked, and the person's reply to it. Classify the \
+         reply as exactly one of: \
+         ANSWER: <value> -- the person answered the question; <value> is that answer, stated as \
+         briefly and literally as possible in a few words, e.g. \"ANSWER: yoghurt with fresh fruit\". \
+         DECLINE -- the person indicated they don't have, didn't do, or don't know this (e.g. no, \
+         nothing, not really, I don't know). \
+         UNRELATED -- the reply does not answer or decline the question at all -- e.g. it asks a \
+         clarifying question back, or changes the subject. \
+         Respond with exactly one line, exactly one of these three forms, and nothing else -- \
+         no explanation, no extra punctuation."
+               }
+        return instruct
+
+
+    def get_instruct_for_gap_declined_ack(self):
+        """Used by prompts.response_processor.get_prompt_for_gap_declined_ack() once the human
+        has indicated (via get_instruct_for_intent_answer_response()'s DECLINE) that they don't
+        have/didn't do/don't know whatever an intent-driven gap question asked about -- a brief
+        acknowledgement that drops the requirement instead of asking it again."""
+        instruct = {"role": "system", "content": "You are an intelligent assistant. \
+         I will give you a short subject and topic that the person just indicated they don't \
+         have, didn't do, or don't know. Reply with a brief, warm acknowledgement in plain " + self._language + ", \
+         at most one short sentence (e.g. \"No worries, thanks for letting me know.\"). \
+         Do not ask a new question about it. \
+         The response should be just the acknowledgement and nothing else."
+               }
+        return instruct
+
+
     def get_instruct_for_object_gap (self):
         instruct = {"role": "system", "content": "You are an intelligent assistant. \
          I will give you as input: a triple with a subject, a predicate and a type of object.\

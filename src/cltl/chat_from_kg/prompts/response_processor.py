@@ -392,3 +392,29 @@ class PromptProcessor():
         predicate_label = local_name(gap["predicate"])
         content = f"{subject_label}, {predicate_label}, {value}"
         return [self._instruct.get_instruct_for_gap_filled_ack(), {"role": "user", "content": content}]
+
+    #### Handling the human's answer to an intent_gap_finder.py-driven follow-up question, for
+    #### any gap that carries a "fill_role" (see intent_gap_finder._make_gap()'s own docstring on
+    #### exactly which requirements set one) -- chat_sessions.KgChatSession._handle_intent_answer_reply()
+    #### uses these together with get_prompt_for_gap_filled_ack() (ANSWER) or
+    #### get_prompt_for_gap_declined_ack() (DECLINE) above: get_prompt_for_intent_answer_response()
+    #### first, to classify what the human said, then whichever ack applies once that's resolved
+    #### (an UNRELATED reply gets neither -- see chat_sessions.py for why).
+
+    def get_prompt_for_intent_answer_response(self, question: str, reply: str):
+        """Build a [instruct, user-message] prompt asking the LLM to classify a human's reply to
+        an intent-driven follow-up question as one of "ANSWER: <value>" / DECLINE / UNRELATED
+        (see get_instruct_for_intent_answer_response() for the exact contract). `question` is
+        that follow-up's own text, so the classifier has it as context for what's being asked."""
+        content = f"Question asked: {question}\nReply: {reply}"
+        return [self._instruct.get_instruct_for_intent_answer_response(), {"role": "user", "content": content}]
+
+    def get_prompt_for_gap_declined_ack(self, gap: dict):
+        """Build a [instruct, user-message] prompt for a brief natural-language acknowledgement
+        after the human indicated (get_prompt_for_intent_answer_response()'s DECLINE) that they
+        don't have/didn't do/don't know whatever `gap` was asking about -- the requirement is
+        simply dropped, not asked again."""
+        subject_label = self._label_for_subject(gap)
+        predicate_label = local_name(gap["predicate"])
+        content = f"{subject_label}, {predicate_label}"
+        return [self._instruct.get_instruct_for_gap_declined_ack(), {"role": "user", "content": content}]

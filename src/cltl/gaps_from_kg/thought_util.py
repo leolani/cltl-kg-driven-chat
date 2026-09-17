@@ -528,14 +528,30 @@ def get_all_label_matches_query(label):
     return query
 
 def get_sem_relation_query(event_id):
+        # NOTE: this used to write the sem: roles as "<sem:hasActor>" etc -- a prefixed name
+        # wrapped in angle brackets, which SPARQL parses as a literal absolute IRI ("sem:hasActor"
+        # itself, scheme "sem") rather than expanding it via the declared "sem:" prefix, so this
+        # never matched anything. Fixed by using the prefixed names directly (no brackets).
+        #
+        # It also used to assume activities carry sem:hasActor/hasPlace/hasTime triples directly,
+        # which they don't -- events_from_chat/events_to_capsules.py only ever asserts this
+        # project's own finer-grained n2mu: role predicates (n2mu:agent, n2mu:location,
+        # n2mu:time/dateTime, ...). "?p rdfs:subPropertyOf* sem:hasActor" (etc) matches any
+        # predicate that IS one of those sem: roles (the path's zero-length case) OR is declared a
+        # (reflexive-transitive) subproperty of it -- which is exactly what
+        # n2mu_sem_roles.upload_role_hierarchy() declares for the n2mu: role predicates that stand
+        # in for each sem: role (see that module's own docstring for exactly which ones, and why).
+        # Evaluated directly against those mapping triples, so this works whether or not the
+        # repository has RDFS reasoning enabled -- no dependency on inference being turned on.
         query = "PREFIX n2mu: <http://cltl.nl/leolani/n2mu/>\
                 PREFIX rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#>\
+                PREFIX rdfs: <http://www.w3.org/2000/01/rdf-schema#>\
                 PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>\
                 select ?actor_id ?place_id ?time_id where { \
                 { \
-                    { <" + event_id +  "> <sem:hasActor> ?actor_id} UNION \
-                    { <" + event_id +  "> <sem:hasPlace> ?place_id} UNION \
-                    { <" + event_id +  "> <sem:hasTime> ?time_id} \
+                    { <" + event_id +  "> ?actor_p ?actor_id . ?actor_p rdfs:subPropertyOf* sem:hasActor . } UNION \
+                    { <" + event_id +  "> ?place_p ?place_id . ?place_p rdfs:subPropertyOf* sem:hasPlace . } UNION \
+                    { <" + event_id +  "> ?time_p ?time_id . ?time_p rdfs:subPropertyOf* sem:hasTime . } \
                 } \
             } "
         return query

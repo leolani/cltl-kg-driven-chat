@@ -34,7 +34,8 @@ Driven from short notebooks under `notebooks/` — **[`chat_session.ipynb`](note
 peer-statistics gaps), **[`kg_intent_chat.ipynb`](notebooks/kg_intent_chat.ipynb)** (KG-populating
 chat, hand-authored **intent**-driven gaps instead) and
 **[`kg_catchup_intent_chat.ipynb`](notebooks/kg_catchup_intent_chat.ipynb)** (the intent-driven
-chat, but opening with an LLM-phrased "what's happened since we last spoke?" turn) — all importing
+chat, but driven by a saturation loop that keeps asking about "what's happened since we last
+spoke?" topics until it judges it has enough for the gap period) — all importing
 `ChatSession`/`KgChatSession`/`KgIntentChatSession` from
 **[`notebooks/chat_sessions.py`](notebooks/chat_sessions.py)**, which in turn wires together the
 two independent pipelines living under `src/cltl/`. All four notebooks drive their live chat
@@ -72,9 +73,11 @@ notebook's own `input()` prompt.
      from hand-authored **[`intents/`](intents/)** definitions instead (see
      [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy)) — works even for the very
      first activity of a kind ever pushed to the graph, unlike the peer-statistics version.
-   - `notebooks/kg_catchup_intent_chat.ipynb` — the intent-driven chat above, but it first queries
-     the graph for when this human last talked at all and opens with an LLM-phrased catch-up
-     question about what's happened since (see [Catch-up opening
+   - `notebooks/kg_catchup_intent_chat.ipynb` — the intent-driven chat above, but driven by a
+     saturation loop: it queries the graph for when this human last talked and how often they
+     typically report each topic, then keeps asking about gap-period topics — interleaved with
+     the intent-driven follow-ups above for whatever's reported — until it judges it has enough
+     for the gap period (see [Catch-up opening
      flow](#catch-up-opening-flow-catch_up_from_kgpy)) — most useful against a graph that already
      has some history for the human in question.
 
@@ -340,6 +343,33 @@ location that doesn't apply to whatever the real symptom turns out to be.
 matched) → the same "fall back to the plain LLM reply" behaviour as `kg_gap_finder.py` finding
 nothing.
 
+### Why the same question doesn't repeat
+
+The incremental SRL extractor doesn't reliably coreference a short follow-up reply ("30 minutes",
+"after meals", "no") back onto the SAME activity/role an intent's question was actually about —
+often it mints a brand-new, near-empty subject for it instead. Since a fresh subject has no gap
+history of its own, the identical requirement looked "never asked" for it and fired again — the
+same question, verbatim or reworded, could repeat indefinitely. Two mechanisms fix this, both in
+`KgChatSession`/`KgIntentChatSession` (`notebooks/chat_sessions.py`):
+
+- **Direct answer capture.** A gap row may carry a `fill_role` (e.g. `"patient"`, `"location"`,
+  `"qualification"`) — set by `intent_gap_finder.py`'s gap builders only when there's a single,
+  unambiguous real predicate to write to (see `_make_gap()`'s own docstring; a multi-variant "date"
+  gap deliberately never gets one). Asking such a gap arms `self._pending_intent_answer`, so the
+  human's very next reply is classified (`get_prompt_for_intent_answer_response()`) as one of:
+  - **ANSWER: \<value\>** — pushed directly onto the pending gap's own subject/role
+    (`_push_gap_triple()`), skipping the general extractor entirely, then acknowledged.
+  - **DECLINE** — nothing pushed; acknowledged and dropped, not re-asked.
+  - **UNRELATED** — e.g. a clarifying question back ("what body function?") — falls through to
+    the ordinary annotate-and-push/gap-finding flow, exactly as if there had been no pending
+    answer at all.
+- **`MAX_INTENT_GAP_ATTEMPTS` backstop.** `KgIntentChatSession._fetch_gap_queue()` also tracks how
+  many times each underlying requirement — keyed by `(id(intent), kind, gap["predicate"])`, so
+  it's the same key no matter which (possibly freshly-minted, unrelated) subject surfaces it — has
+  been surfaced this chat. Once that hits `MAX_INTENT_GAP_ATTEMPTS` (2), the intent gives up on it
+  silently for the rest of the session (logged as `gave_up: True` in `turn_log`'s `gap_queries`
+  entries) — the safety net for whatever the classifier above still gets wrong.
+
 ## `notebooks/` — putting it together
 
 `notebooks/chat_sessions.py` is a plain Python module (not a notebook) holding the two classes
@@ -355,25 +385,32 @@ constructed, not on import.
 | `chat_sessions.py` — demo helpers | `mock_agent(messages)` (no API key needed) and `simulate_chat(...)`, for exercising the turn format without typing anything; `save_turns(turns, path)` to write JSON. |
 | `chat_sessions.py` — `KgChatSession` | The full KG loop, peer-statistics gaps (see below). |
 | `chat_sessions.py` — `KgIntentChatSession` | Same loop, but follow-up questions come from `intent_gap_finder.py` instead — see [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy) and below. |
-| `catch_up_from_kg.py` | The opening "what's happened since we last spoke?" phase, built on `gaps_from_kg/get_temporal_containers.py` — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
+| `catch_up_from_kg.py` | `SaturationTracker` — the "keep asking about gap-period topics until we have enough" loop, built on `gaps_from_kg/get_temporal_containers.py` — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
 | `kg_chat_gui.py` | `run_gui(session)`: opens one Tkinter window (`ChatWindow`) for a `ChatSession`/`KgChatSession` — the whole transcript scrolls on the left, and the human types into an entry box built into the *same* window (no `input()`, no popup). Each agent turn is tagged **[KG]**/**[LLM]** from `session.reply_sources` (a plain `ChatSession` has none, so it's always **[LLM]**). For a `KgChatSession`, a **Gap sensitivity** slider adjusts `session.gap_threshold` live, mid-conversation — dragging it also drops any already-cached per-instance gap queues, so the new sensitivity takes effect on the very next gap lookup rather than only once whatever was already queued happens to drain (`_on_gap_threshold_change`); not shown for a plain `ChatSession`, which has no `gap_threshold`. A **Text size** slider (always shown, 16pt default) live-resizes the whole conversation area at once via shared `tkinter.font.Font` objects. When `session.kg_address` is a GraphDB repository, the window splits and a live **graph panel** appears on the right (see below), with its own independent **Font size** slider. Talking to the graph/LLM runs on a background thread per turn so the window never freezes; the entry box is never disabled, so a quit word ("bye" etc., checked first in `_on_send`) or the always-enabled **Quit** button closes the window immediately even if a reply is stuck (`_on_close` calls `root.quit()` before `root.destroy()` — destroy alone doesn't reliably end a `mainloop()` that Jupyter is driving, which left the window up and the cell hanging). Quitting also writes the transcript and a statistics summary to timestamped JSON files via `save_session()`/`session_statistics()` — plus, for a `KgChatSession`, its per-turn `turn_log` (see below) as a third file — (`save_dir=None` disables). Returns `session.turns`, so it's a drop-in replacement for `run_interactive()` in a notebook cell. |
 | `chat_session.ipynb` | Imports `ChatSession`/`mock_agent`/`simulate_chat`/`save_turns`/`run_gui` and runs a plain chat: live (`run_gui(ChatSession(...))`) or scripted (`simulate_chat()`), then inspects/saves the resulting turns. |
 | `kg_chat_session.ipynb` | Imports `KgChatSession`/`run_gui`, sets `KG_ADDRESS`/`KG_LOG_DIR`, and runs a live KG-populating chat, then inspects `annotations`/`kg_pushes`/`reply_sources`. |
 | `kg_intent_chat.ipynb` | Same as `kg_chat_session.ipynb`, but constructs `KgIntentChatSession` (`intents_dir=` defaults to the project's own `intents/`) instead of `KgChatSession` — no `gap_threshold`/`gap_activity_types` (not meaningful here; see [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy)) — and its `turn_log` prints an `intent gap query: ...` line (matched intent + `activity_type`) instead of `kg_gap_finder`'s peer-vote breakdown. |
-| `kg_catchup_intent_chat.ipynb` | Builds a `KgIntentChatSession` exactly like `kg_intent_chat.ipynb`, but first runs `catch_up_from_kg.py`'s queries and opens with `kg_session.open_with(opening_question)` before starting the live chat — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
+| `kg_catchup_intent_chat.ipynb` | Builds a `KgIntentChatSession` exactly like `kg_intent_chat.ipynb`, but with its `agent_fn` wrapped by `catch_up_from_kg.wrap_agent_fn_with_saturation_loop()` and `on_new_subject=tracker.record_new_activity`, and opens with `SaturationTracker.opening_question()` before starting the live chat — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
 
 ### `KgChatSession(ChatSession)`
 
-For every new **human** turn, `say()` branches on whether the *previous* agent turn was an
-agent-confirmation question (`self._pending_confirmation`, armed by `_reply_from_gaps` — see
-[Agent gaps: confirmation instead of an open question](#agent-gaps-confirmation-instead-of-an-open-question)
-above):
+For every new **human** turn, `say()` branches three ways on whether the *previous* agent turn
+was a pending gap question of one of two kinds (both armed by `_reply_from_gaps` — see [Agent
+gaps: confirmation instead of an open
+question](#agent-gaps-confirmation-instead-of-an-open-question) and [Why the same question
+doesn't repeat](#why-the-same-question-doesnt-repeat) above):
 
-- **A confirmation is pending** — the turn is routed to `_handle_confirmation_reply()` instead of
-  the general SRL pipeline: it classifies the reply, then either pushes the confirmed/corrected
-  triple straight to the KG (`_push_gap_triple`, bypassing `LLM_EventExtraction` entirely — it
-  isn't built to make sense of a bare "yes") or, on a plain denial, falls back to the open
-  question for the same gap.
+- **An agent-confirmation is pending** (`self._pending_confirmation`) — routed to
+  `_handle_confirmation_reply()` instead of the general SRL pipeline: it classifies the reply,
+  then either pushes the confirmed/corrected triple straight to the KG (`_push_gap_triple`,
+  bypassing `LLM_EventExtraction` entirely — it isn't built to make sense of a bare "yes") or, on
+  a plain denial, falls back to the open question for the same gap.
+- **A non-agent-like intent answer is pending** (`self._pending_intent_answer`, only ever armed
+  for an `intent_gap_finder.py` gap with a `fill_role`) — routed to
+  `_handle_intent_answer_reply()`: ANSWER pushes the value onto the gap's own subject/role and
+  acknowledges (same idea as confirmation, generalized); DECLINE acknowledges and drops the
+  requirement (deliberately does *not* re-ask, unlike a plain agent denial); UNRELATED falls
+  through to the normal flow below, exactly as if nothing had been pending.
 - **Otherwise**, the normal flow:
   1. Immediately runs `LLM_EventExtraction.annotate_new_turn(...)` on the turn and, if it
      produced anything, pushes it into the graph with `populate_ekg_from_annotations(...)`
@@ -381,14 +418,15 @@ above):
      just asserted).
   2. **If new triples were pushed**, `_reply_from_gaps` asks `_next_gap` for the next gap to ask
      about around those subject URIs and, via `LLMTripleReplier`, turns it into the agent's
-     reply — arming `self._pending_confirmation` if that gap was an agent-confirmation.
+     reply — arming `self._pending_confirmation` or `self._pending_intent_answer` depending on
+     the gap.
   3. **Otherwise** (no new triples, or no gap left to ask) falls back to the default `agent_fn`
      reply, same as plain `ChatSession`.
 
 Either way, the agent's reply is then recorded as its own turn and annotated + pushed too (so the
 extractor's running context includes what the agent said, same as the batch pipeline would) —
-except a confirmation-reply turn's *human* turn skips that generic annotation, for the same
-reason it skipped it going in.
+except a confirmation-reply or intent-answer-reply turn's *human* turn skips that generic
+annotation, for the same reason it skipped it going in.
 
 **Gaps are asked one at a time, in sequence, and never repeated.** `_next_gap(subject_uris)`
 keeps a per-activity-instance queue (`self._gap_queues`, most-affected gap first) fetched by one
@@ -464,13 +502,19 @@ answer is:
   checks already run in priority order and stop at the first unmet one, so the "queue" this
   returns is always length 0 or 1 — `_next_gap()` drains it exactly the same way regardless.
 - **`turn_log`'s `gap_queries` entries** are shaped `{"subject", "activity_type",
-  "intent_source", "after_dedup"}` (which `intents/*.json` file matched, if any) instead of
-  `kg_gap_finder`'s peer-vote fields (`threshold`/`found`) — there's no peer voting to report here.
+  "intent_source", "after_dedup", "gave_up"}` (which `intents/*.json` file matched, if any, and
+  whether `MAX_INTENT_GAP_ATTEMPTS` kicked in — see below) instead of `kg_gap_finder`'s peer-vote
+  fields (`threshold`/`found`) — there's no peer voting to report here.
 
 `self.intents` holds the loaded intent definitions (`intent_gap_finder.load_intents()`); an
 activity type covered by none of them is never gap-driven — its turns are still
 annotated/pushed to the graph like any other, but the agent's reply for it always falls back to
 the plain default `agent_fn`.
+
+**The same intent question doesn't repeat forever** — see [Why the same question doesn't
+repeat](#why-the-same-question-doesnt-repeat) above for the full mechanism
+(`KgChatSession._pending_intent_answer`/`_handle_intent_answer_reply()` plus this class's own
+`self._intent_requirement_attempts`/`MAX_INTENT_GAP_ATTEMPTS`).
 
 ```python
 from kg_chat_gui import run_gui
@@ -521,7 +565,8 @@ A few things this does and doesn't cover:
   `say()`, so retrying is still routed as answering that same confirmation — not treated as an
   unrelated fresh utterance. A timeout while *acknowledging* an already-pushed confirm/correction
   does **not** restore it — the KG write already happened by then; only the acknowledgement text
-  is missing.
+  is missing. `self._pending_intent_answer`/`_handle_intent_answer_reply()` (see [Why the same
+  question doesn't repeat](#why-the-same-question-doesnt-repeat)) follows the identical pattern.
 - **A timeout annotating the agent's own successful reply** (the last step of `say()`, purely
   background bookkeeping for future gap-finding/extractor context) is handled separately and
   more leniently: it's only logged to stdout (`[KgChatSession] timed out ...`), never allowed to
@@ -622,38 +667,75 @@ already running by the time that thread's own `.after()` call happens.
 ## Catch-up opening flow: `catch_up_from_kg.py`
 
 `kg_intent_chat.ipynb` (and `kg_chat_session.ipynb`) both start a live chat cold — the human has
-to bring up whatever they want to talk about themselves. **[`notebooks/catch_up_from_kg.py`](notebooks/catch_up_from_kg.py)**
-adds an opening phase on top of `KgIntentChatSession`, driven from
+to bring up whatever they want to talk about themselves, and the conversation runs until they
+stop, with no notion of "have we actually covered enough for the time that's passed." **[`notebooks/catch_up_from_kg.py`](notebooks/catch_up_from_kg.py)**
+replaces that with a closed loop on top of `KgIntentChatSession`, driven from
 **[`src/cltl/gaps_from_kg/get_temporal_containers.py`](src/cltl/gaps_from_kg/get_temporal_containers.py)**
 — a *different* query layer over the same GraphDB repository (`cltl.brain.LongTermMemory`'s own
-SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by
-`kg_catchup_intent_chat.ipynb`:
+SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by `kg_catchup_intent_chat.ipynb`:
 
+0. **`connect_brain(kg_address, log_dir)`** — connects, and calls **`ensure_role_hierarchy()`**:
+   a one-time, idempotent SPARQL Update that uploads
+   **[`gaps_from_kg/n2mu_sem_roles.py`](src/cltl/gaps_from_kg/n2mu_sem_roles.py)**'s
+   `rdfs:subPropertyOf` mapping from this project's own fine-grained `n2mu:` SRL role predicates
+   (`agent`/`agent_patient`/`participant`/`experiencer` → `sem:hasActor`, `location` →
+   `sem:hasPlace`, the four `time/*` variants → `sem:hasTime`) to the SEM ontology roles
+   `get_temporal_containers()`'s underlying query actually reads (see below). The actor-like set
+   mirrors `kg_gap_finder.AGENT_ROLE_PREDICATES` exactly — `patient` itself is deliberately
+   excluded, since it's what an activity acts *on*, not who acts.
 1. **`find_last_conversation_date(human, brain, current_date, fallback_date)`** — wraps
    `get_temporal_containers.get_last_conversation_date()`: the most recent date this human is on
    record as having spoken at all, or `fallback_date` if the graph has none (e.g. a brand new
    human).
 2. **`find_catch_up_topics(brain, current_date, recent_date)`** — for every activity/condition
-   type `chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES` already covers, runs
-   `get_temporal_containers.get_temporal_containers()` and keeps the ones with real **history**
-   (something dated before the last conversation) and nothing already in the **gap** bucket
-   (dated between then and now) — sorted most-recently-discussed first.
-3. **`render_opening_question(...)`** — one LLM call that phrases the actual first turn: how long
-   it's been, and an invitation to share what's happened since, naming the `lead_topics` (default
-   2) most-recent topics as concrete memory prompts.
-4. **`CatchUpQueue`** — the *remaining* topics, handed out one at a time via `next_question()`.
-5. **`wrap_agent_fn_with_catch_up(agent_fn, queue)`** — wraps a plain `agent_fn` so that every
-   call to it (which `KgChatSession.say()` only ever makes once it's found no per-turn intent gap
-   to ask about — the `"default"` `reply_sources` case) asks the next queued catch-up topic
-   instead, until the queue runs out; then it's a no-op passthrough. This is the **only**
-   integration point — `chat_sessions.py`/`KgIntentChatSession` need no changes at all, since
-   `agent_fn` is already a pluggable constructor parameter.
+   type `chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES` already covers with real **history** (something
+   dated before the last conversation), runs `get_temporal_containers.get_temporal_containers()`
+   and computes, per topic:
+   - **`expected_count`** — this topic's own *saturation target* for a gap this long: the average
+     number of that topic's activities found per gap-length window, tiling that window size
+     backwards across the human's *entire* history before the gap (`_windowed_average_rate()`) —
+     "the average frequency of this topic in similar periods before the gap," at least 1 whenever
+     there's any history at all.
+   - **`initial_reported_count`** — however many of this topic's activities are *already* in the
+     KG's own "gap" bucket (dated between the last conversation and now) before this conversation
+     even starts, e.g. from another channel — credited toward the target instead of double-asked.
+3. **`SaturationTracker`** — holds every topic's target and how many have actually been reported
+   *live* this session (seeded from `initial_reported_count`, updated via
+   `record_new_activity(activity_type)`):
+   - **`opening_question(...)`** — one LLM call phrasing the actual first turn: how long it's
+     been, inviting the human to share what's happened, naming the `lead_topics` (default 2)
+     topics with the biggest shortfall as concrete memory prompts — and marks those as asked once,
+     so the loop below doesn't immediately repeat them.
+   - **`next_question()`** — asks about whichever still-*unsaturated* topic (short of its own
+     `expected_count`, and not yet at the per-topic ask cap) has the biggest shortfall, rephrased
+     as a natural follow-up ("anything else...") once a topic's already been asked about before,
+     rather than the identical question again.
+   - **`is_saturated()`** — True once every topic is at/above target or capped out (see below) —
+     "enough knowledge for the gap period" (this module's stated goal), not "every target hit no
+     matter what."
+   - **`MAX_ASKS_PER_TOPIC`** (default 3) — a hard per-topic cap, independent of whether its own
+     target was ever reached: a human with nothing more to say about a topic shouldn't be asked
+     about it forever. Bounds the whole loop too (at most `len(topics) * MAX_ASKS_PER_TOPIC`
+     catch-up questions, worst case).
+4. **`wrap_agent_fn_with_saturation_loop(agent_fn, tracker)`** — wraps a plain `agent_fn` so that
+   every call to it (which `KgChatSession.say()` only ever makes once it's found no per-turn
+   intent gap left to ask about — the `"default"` `reply_sources` case) asks about the next
+   under-covered topic instead, for as long as `tracker.is_saturated()` is False; once every topic
+   is saturated (or capped out), every call goes straight through to `agent_fn` unchanged.
 
-The moment the human mentions an actual new activity/condition — whether in reply to the opening
-question, a queued catch-up topic, or anything else — `KgIntentChatSession`'s own per-turn flow
-takes over for it completely unchanged (SRL extraction → push to the KG →
-`intent_gap_finder.next_intent_gap()`). This module only ever supplies the opening turn and fills
-in for the *default* reply; it never competes with an actual intent-driven gap question.
+The loop this produces: **ask about a gap-period topic** (`next_question()`) → whatever the human
+reports is handled entirely by `KgIntentChatSession`'s own *existing* per-turn flow, completely
+unchanged (SRL extraction → push to the KG → `intent_gap_finder.next_intent_gap()` keeps drilling
+into that SAME activity's own what/how much/when/where for as long as its matching intent has
+unmet requirements) → once that's exhausted and `say()` would fall back to the default reply, **go
+back to asking about a topic** (the same one again if still short, or a different one) → **unless
+`tracker.is_saturated()`**, at which point the conversation just continues normally. Getting
+`SaturationTracker.record_new_activity()` called for every genuinely new activity as it's pushed
+— the *only* piece this needs from `chat_sessions.py` itself, since the rest is pure `agent_fn`
+wrapping — is `KgChatSession`'s own `on_new_subject` constructor parameter: an optional
+`callable(subject_uri, activity_type)` invoked exactly once per new `activity_id`, the first time
+`_annotate_and_push()` ever sees a recognized type for it (never again on a later turn that just
+adds another role to one already known).
 
 ```python
 import catch_up_from_kg as catch_up
@@ -663,24 +745,28 @@ brain = catch_up.connect_brain(KG_ADDRESS, log_dir=KG_LOG_DIR)
 last_date = catch_up.find_last_conversation_date("Mehmet", brain, CURRENT_DATE, FALLBACK_DATE)
 topics = catch_up.find_catch_up_topics(brain, CURRENT_DATE, last_date)
 
-opening_question = catch_up.render_opening_question("Mehmet", CURRENT_DATE, last_date, topics)
-queue = catch_up.CatchUpQueue(topics[2:], human="Mehmet")   # topics[:2] are already in the opener
-agent_fn = catch_up.wrap_agent_fn_with_catch_up(openai_agent(), queue)
+tracker = catch_up.SaturationTracker(topics, human="Mehmet")
+agent_fn = catch_up.wrap_agent_fn_with_saturation_loop(openai_agent(), tracker)
 
-kg_session = KgIntentChatSession(chat=1, human="Mehmet", kg_address=KG_ADDRESS, agent_fn=agent_fn)
+kg_session = KgIntentChatSession(
+    chat=1, human="Mehmet", kg_address=KG_ADDRESS, agent_fn=agent_fn,
+    on_new_subject=tracker.record_new_activity,
+)
+opening_question = tracker.opening_question(CURRENT_DATE, last_date, lead_topics=2)
 kg_session.open_with(opening_question)
 ```
 
-**Known caveat:** `gaps_from_kg/thought_util.py`'s `get_sem_relation_query()` /
-`get_role_relation_query()` / `get_perspective_query()` write predicates as e.g. `<sem:hasActor>`
-— a *prefixed* name wrapped in angle brackets, which SPARQL parses as a literal absolute IRI
-rather than expanding it via the declared `sem:` prefix, so those lookups may never match the real
-`http://semanticweb.cs.vu.nl/2009/11/sem/hasActor`-style triples `cltl.brain` actually writes.
-If so, every activity `get_temporal_containers()` looks at lands in its "unknown" (dateless)
-bucket instead of "history"/"gap", and `find_catch_up_topics()` finds nothing to catch up on.
-Worth checking against your own GraphDB repository before relying on this flow surfacing real
-topics; this is pre-existing behaviour in `gaps_from_kg/`, not something `catch_up_from_kg.py`
-introduces.
+**Why the role mapping is needed:** `gaps_from_kg/thought_util.py`'s `get_sem_relation_query()`
+looks for `sem:hasActor`/`sem:hasPlace`/`sem:hasTime`, but no activity ever carries those directly
+— `events_from_chat/events_to_capsules.py` only ever asserts this project's own finer-grained
+`n2mu:` role predicates. Two bugs used to make this a dead end: the query wrote those sem: roles
+as `<sem:hasActor>` (a prefixed name wrapped in angle brackets, which SPARQL parses as a literal,
+never-matching IRI rather than expanding the `sem:` prefix), and even fixed, it still had no way
+to know an `n2mu:agent` triple *means* `sem:hasActor`. Both are fixed now: the query uses the
+prefixed names directly and matches `?p rdfs:subPropertyOf* sem:hasActor` (etc.) instead of the
+literal predicate, and `ensure_role_hierarchy()` is what makes that path resolve — evaluated
+directly against the uploaded mapping triples, so it works whether or not the repository has RDFS
+reasoning enabled.
 
 ## Setup
 
@@ -739,23 +825,48 @@ introduces.
   triples (e.g. predicate-type declarations) won't match that filter, since they're not
   test-specific; a node already corrupted by id collisions needs its *unwanted* triples picked out
   by hand instead (the filter above would delete the whole merged node, wanted triples included).
-- **`_gap_queues`/`_asked_gap_keys`/`_pending_confirmation` are in-memory only**, per
-  `KgChatSession` instance — recreating the session (e.g. a fresh notebook kernel) forgets which
-  gaps were already asked, so a gap the graph still lacks a value for can resurface even though
-  it was asked (and denied-without-correction) in an earlier session.
+- **`_gap_queues`/`_asked_gap_keys`/`_pending_confirmation`/`_pending_intent_answer`/
+  `_intent_requirement_attempts` are all in-memory only**, per `KgChatSession`/
+  `KgIntentChatSession` instance — recreating the session (e.g. a fresh notebook kernel) forgets
+  which gaps were already asked (or how many times each intent requirement was already surfaced),
+  so a gap the graph still lacks a value for can resurface, and `MAX_INTENT_GAP_ATTEMPTS`'s count
+  restarts from zero, even though it was asked (and denied-without-correction, or already given up
+  on) in an earlier session.
 - **A confirmation turn costs two extra LLM calls** on top of the usual per-turn ones: one to
   classify the reply (`get_prompt_for_confirmation_response`), one to phrase the acknowledgement
   or fallback question. `_push_gap_triple` also always types a confirmed/corrected agent as
   `RoleType.person` — reasonable for "my son"/"my daughter"-style corrections, but not checked
-  against what the correction actually says.
+  against what the correction actually says. `_handle_intent_answer_reply()`'s generalized version
+  (see [Why the same question doesn't repeat](#why-the-same-question-doesnt-repeat)) costs the same
+  two extra calls, and its own classifier is a single LLM call with no retry — a reply it
+  misclassifies as UNRELATED just falls through to the ordinary extractor (no worse than before
+  this feature existed), but one misclassified as ANSWER pushes whatever value it extracted
+  as-is, unchecked against the gap's own expected type. `MAX_INTENT_GAP_ATTEMPTS` (2) is a module
+  constant, not yet a constructor parameter — change it in `chat_sessions.py` directly if a
+  different chat needs a different cap.
 - **An intent's `activity_types`/`activity_labels` must match the graph's own spelling exactly**
   (after `intent_gap_finder._normalize()`'s case/`-`/`_`/space folding) — an `intents/*.json` file
   covering a real `data_type.ActivityType` value under a slightly different spelling silently
   matches nothing, and that activity type just never gets an intent-driven follow-up (falls back
   to the plain LLM reply) with no error anywhere to flag the mismatch.
-- **`gaps_from_kg/`'s temporal queries may never find a date** — see the caveat at the end of
-  [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy) about
-  `thought_util.py`'s `<sem:hasActor>`-style queries not expanding the `sem:` prefix.
+- **`ensure_role_hierarchy()`'s mapping is fixed, hand-picked, and additive-only.** It covers
+  exactly the roles `get_sem_relation_query()` reads (actor-like roles, `location`, the four
+  `time/*` variants — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy)); a
+  new SRL role added to `data_type.SemanticRole` later that some other sem:-based query needs
+  won't automatically get a mapping. There's also no corresponding "remove"/"re-sync" step — it
+  only ever inserts triples, never revises `ROLE_SUBPROPERTY_MAP` changes already uploaded to an
+  older repository.
+- **`SaturationTracker`'s targets assume the future looks like the past.** `expected_count`
+  (see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy)) is a plain historical
+  average with no seasonality/trend awareness — a topic the human used to report often but has
+  since stopped still gets a target based on their OLD rate, and `MAX_ASKS_PER_TOPIC` (not the
+  target) is what actually stops it from being asked about forever in that case.
+  `initial_reported_count` is only as complete as `get_temporal_containers()`'s own date-based
+  "gap" bucket — an activity with only a vague, unresolved time phrase (`"for an hour"`,
+  `"recently"`) never lands there (see `_parse_event_time()`), so pre-existing gap-period data
+  like that is invisible to the STARTING seed; live counting via `record_new_activity()` doesn't
+  have this problem at all, since it's driven by `on_new_subject` firing on push, not by parsing
+  a date back out of the graph afterward.
 - **The graph panel's plain-text triples aren't the actual GraphDB Visual graph** — see [Split-
   screen graph panel](#split-screen-graph-panel) for why a real embed isn't practical in Tkinter;
   "Open in GraphDB ↗" is the only way to see the real, interactive view. It also adds one SPARQL

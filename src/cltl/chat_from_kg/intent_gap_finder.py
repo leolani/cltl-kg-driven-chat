@@ -376,7 +376,8 @@ def _known_context(graph, own_triples: List[Dict]) -> Dict[str, str]:
 
 def _make_gap(cls_label: str, predicate: str, subject_uri: str, own_triples: List[Dict],
               object_type: Optional[str] = None, known_context: Optional[Dict[str, str]] = None,
-              question_template: Optional[str] = None) -> Dict:
+              question_template: Optional[str] = None, fill_role: Optional[str] = None,
+              fill_role_type: Optional[str] = None) -> Dict:
     """One kg_gap_finder.py-shaped gap row -- see its find_predicate_gaps()/
     find_predicate_object_gaps() docstrings for the shape this mirrors. `predicate` may be a
     real RDF predicate URI (e.g. kg_gap_finder.NAMESPACE + "patient") or a plain display string
@@ -391,7 +392,23 @@ def _make_gap(cls_label: str, predicate: str, subject_uri: str, own_triples: Lis
     the intent author's own hand-written example question for this requirement, already filled
     in with {activity}/{patient} -- carried through as-is, None if the intent gave none, so
     prompts.response_processor.get_prompt_for_kg_gap() can have the LLM paraphrase THAT instead
-    of inventing a question from the bare subject/predicate/type triple."""
+    of inventing a question from the bare subject/predicate/type triple.
+
+    `fill_role` (a plain ROLE_FIELDS_WITH_TYPE-style role name, e.g. "patient"/"location"/
+    "qualification") is set ONLY when there's a single, unambiguous real RDF predicate this
+    requirement can be filled in on directly from the human's own next reply -- see
+    notebooks/chat_sessions.KgChatSession._reply_from_gaps()/_handle_intent_answer_reply(),
+    which arms a "pending intent answer" for exactly this case: instead of relying on the
+    general-purpose SRL extractor to coreference a short follow-up reply ("yoghurt with fresh
+    fruit", "30 minutes") back to the SAME activity/role the question was actually about --
+    which it doesn't reliably do, letting the identical gap resurface on a freshly-minted,
+    unrelated subject next turn -- the reply is attached to `subject_uri`'s own `fill_role`
+    directly. Left None (the default, from every caller that doesn't pass it) for a requirement
+    with no single safe predicate to name this way -- see _predicate_presence_gap()'s own
+    comment on why the multi-variant "date" check is deliberately one of these. `fill_role_type`
+    is the single RoleType-ish value (e.g. "food") to tag the pushed object with when `fill_role`
+    is a typed role like "patient"/"location" -- None for an untyped one like "qualification".
+    """
     gap = {
         "class": cls_label,
         "predicate": predicate,
@@ -401,6 +418,8 @@ def _make_gap(cls_label: str, predicate: str, subject_uri: str, own_triples: Lis
         "peer_examples": [],
         "known_context": known_context or {},
         "question_template": question_template,
+        "fill_role": fill_role,
+        "fill_role_type": fill_role_type,
     }
     if object_type is not None:
         gap["object_type"] = object_type
@@ -413,7 +432,10 @@ def _predicate_object_type_gap(graph, subject_uri: str, cls_label: str, own_trip
                                 question_template: Optional[str] = None) -> Optional[Dict]:
     """None if `subject_uri` already has a `predicate_local` (under kg_gap_finder.NAMESPACE)
     triple whose object's rdf:type includes one of `expected_types` (matched by local name,
-    normalized) -- otherwise a "predicate_object_type" gap row for it."""
+    normalized) -- otherwise a "predicate_object_type" gap row for it. `predicate_local` itself
+    (e.g. "patient", "location") is always a single, unambiguous real role name, and the first of
+    `expected_types` (if any) a reasonable single type to tag a directly-pushed answer with -- so
+    this always sets `fill_role`/`fill_role_type` (see _make_gap()) unconditionally."""
     predicate_uri = kg_gap_finder.NAMESPACE + predicate_local
     normalized_expected = {_normalize(t) for t in expected_types}
     for t in own_triples:
@@ -423,7 +445,8 @@ def _predicate_object_type_gap(graph, subject_uri: str, cls_label: str, own_trip
         if normalized_expected & object_type_names:
             return None
     return _make_gap(cls_label, predicate_uri, subject_uri, own_triples, object_type=" or ".join(expected_types),
-                      known_context=known_context, question_template=question_template)
+                      known_context=known_context, question_template=question_template,
+                      fill_role=predicate_local, fill_role_type=next(iter(expected_types), None))
 
 
 def _predicate_presence_gap(subject_uri: str, cls_label: str, own_triples: List[Dict],
@@ -434,12 +457,23 @@ def _predicate_presence_gap(subject_uri: str, cls_label: str, own_triples: List[
     single URI, or several -- e.g. kg_gap_finder.TIME_PREDICATE_VARIANTS' four "time/..." URIs,
     any one of which counts as "has a date") -- otherwise a "predicate" gap row using
     `display_name` (not the real predicate URI) as the gap's own "predicate" field, so the
-    resulting question reads naturally (see _make_gap())."""
+    resulting question reads naturally (see _make_gap()).
+
+    `fill_role` (see _make_gap()) is only ever set when `predicate_uris` names exactly ONE real
+    predicate -- e.g. a secondary_objectives entry's generic single-aspect check. The "date"
+    check (`predicate_uris` = kg_gap_finder.TIME_PREDICATE_VARIANTS' four URIs) deliberately
+    leaves it unset: a direct answer like "yesterday" or "for an hour" could resolve to any of
+    dateTime/rangeTime/recurringTime/vagueTime depending on its own phrasing (see
+    events_to_capsules.get_triples_with_types_and_activity_id()'s own time_resolved handling),
+    which isn't something to guess blindly from a bare reply string -- so a "date" gap is never
+    auto-filled this way, only ever answered through the ordinary SRL extractor, same as before
+    this feature existed."""
     predicate_set = {predicate_uris} if isinstance(predicate_uris, str) else set(predicate_uris)
     if any(t["predicate"] in predicate_set for t in own_triples):
         return None
+    fill_role = _local_name(next(iter(predicate_set))) if len(predicate_set) == 1 else None
     return _make_gap(cls_label, display_name, subject_uri, own_triples, known_context=known_context,
-                      question_template=question_template)
+                      question_template=question_template, fill_role=fill_role)
 
 
 def _qualification_gap(subject_uri: str, cls_label: str, own_triples: List[Dict],
@@ -464,6 +498,11 @@ def _qualification_gap(subject_uri: str, cls_label: str, own_triples: List[Dict]
     is resolved for the SPECIFIC aspect this call is about to return a gap for
     (aspects[<count>]), then rendered (see _render_question_template()) with `activity_label`/
     `patient_label`/`patient_type` into the gap's own `question_template`.
+
+    Always sets `fill_role="qualification"` (see _make_gap()) -- whichever aspect is actually
+    being asked about, the real underlying predicate to push a direct answer to is always the
+    same untyped `n2mu:qualification` (there is no per-aspect predicate to begin with, per this
+    docstring's own point above), so this is never ambiguous the way "date" is.
     """
     qualification_uri = kg_gap_finder.NAMESPACE + "qualification"
     count = sum(1 for t in own_triples if t["predicate"] == qualification_uri)
@@ -473,7 +512,7 @@ def _qualification_gap(subject_uri: str, cls_label: str, own_triples: List[Dict]
     template = _render_question_template(_question_for_aspect(question_source, aspect), activity_label,
                                           patient_label=patient_label, patient_type=patient_type)
     return _make_gap(cls_label, aspect, subject_uri, own_triples, known_context=known_context,
-                      question_template=template)
+                      question_template=template, fill_role="qualification")
 
 
 # --------------------------------------------------------------------------- #

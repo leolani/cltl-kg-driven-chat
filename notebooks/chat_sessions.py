@@ -58,6 +58,17 @@ DEFAULT_GAP_ACTIVITY_TYPES = (
     "sleep",
 )
 
+# KgIntentChatSession._fetch_gap_queue()'s backstop: the same underlying intent requirement (see
+# its own "requirement key" comment there) is asked about at most this many times per chat before
+# the intent gives up on it for the rest of the session, regardless of which (possibly
+# freshly-minted, unrelated) subject keeps surfacing it. A hard cap independent of
+# _handle_intent_answer_reply()'s own direct-answer-capture (see chat_sessions.KgChatSession) --
+# that fixes the common case (a short follow-up reply gets correctly attached to the pending gap
+# instead of coreferenced onto a new, empty subject); this is the safety net for whatever it still
+# misses (e.g. an "unrelated" classification that itself turns out to be another coreference
+# miss), so the same question can't repeat indefinitely either way.
+MAX_INTENT_GAP_ATTEMPTS = 2
+
 
 # --------------------------------------------------------------------------- #
 # Setup
@@ -435,7 +446,8 @@ class KgChatSession(ChatSession):
 
     def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
                  system_prompt=None, extractor=None, replier=None, gap_threshold=0.3,
-                 gap_activity_types=DEFAULT_GAP_ACTIVITY_TYPES, clear_all=False):
+                 gap_activity_types=DEFAULT_GAP_ACTIVITY_TYPES, clear_all=False,
+                 on_new_subject=None):
         super().__init__(chat=chat, human=human, date=date, agent_fn=agent_fn, system_prompt=system_prompt)
         deps = _load_kg_dependencies()
         self._populate_ekg_from_annotations = deps["populate_ekg_from_annotations"]
@@ -444,6 +456,14 @@ class KgChatSession(ChatSession):
 
         self.kg_address = kg_address
         self.log_dir = log_dir
+        # Optional callable(subject_uri, activity_type_local_name) -- called exactly once per
+        # genuinely NEW activity_id (see _annotate_and_push()'s own "is_new" check), the first
+        # time it's ever seen a recognized type, never again on a later turn that just adds
+        # another role to one already known. The only integration point catch_up_from_kg.py's
+        # SaturationTracker needs with this module: it passes its own record_new_activity() here
+        # to count, live, how many of each gap-period topic have actually been reported so far
+        # this session -- see that module's own docstring. None (the default) is a no-op.
+        self.on_new_subject = on_new_subject
         # DEFAULT_OPENAI_TIMEOUT -- see there, and ChatTimeoutError/_call_openai() -- for why.
         self.extractor = extractor or deps["LLM_EventExtraction"](timeout=DEFAULT_OPENAI_TIMEOUT)
         self.replier = replier if replier is not None else deps["LLMTripleReplier"](
@@ -478,6 +498,14 @@ class KgChatSession(ChatSession):
         # human's answer -- see _reply_from_gaps()/_handle_confirmation_reply(). None whenever
         # there isn't one pending.
         self._pending_confirmation = None
+        # (gap, kind, question_text) for any OTHER intent-driven gap question just asked whose
+        # gap carries a "fill_role" (see intent_gap_finder._make_gap()'s own docstring) -- awaiting
+        # the human's answer, same idea as self._pending_confirmation but for non-agent-like
+        # requirements (what/how much/where, not who) -- see _reply_from_gaps()/
+        # _handle_intent_answer_reply(). Mutually exclusive with self._pending_confirmation (a
+        # gap is routed to at most one of the two -- see _reply_from_gaps()). Always None for a
+        # plain KgChatSession, since kg_gap_finder.py's own gaps never carry a "fill_role".
+        self._pending_intent_answer = None
         # See the class docstring -- kept as [] until the first successful push.
         self.last_subject_uris = []
         # See the class docstring's "self.turn_log" paragraph. _pending_gap_queries/
@@ -504,7 +532,8 @@ class KgChatSession(ChatSession):
         A timeout while CLASSIFYING a pending confirmation reply (as opposed to acknowledging
         it) restores self._pending_confirmation first -- see _handle_confirmation_reply() -- so
         the human's retry is still routed as answering that same confirmation, not treated as an
-        unrelated fresh utterance.
+        unrelated fresh utterance. The same applies to self._pending_intent_answer/
+        _handle_intent_answer_reply() (see there).
 
         Once a real reply exists, annotating/pushing the AGENT's own turn (the last step, purely
         bookkeeping for future gap-finding/extractor context) is handled separately: a timeout
@@ -537,19 +566,35 @@ class KgChatSession(ChatSession):
                 source_tag = "gap"
                 human_triples_pushed = self._pending_triples_pushed
             else:
-                # Record + annotate + push the human turn FIRST: whether the agent's reply is a
-                # KG-grounded gap question depends on what (if anything) this turn just added.
-                _, new_subjects, human_triples_pushed = self._annotate_and_push(human_turn)
-                if new_subjects:
-                    self.last_subject_uris = new_subjects
-                # last_subject_uris (above, for the graph panel) and triples_pushed cover EVERY
-                # new subject regardless of type; gap-finding itself only runs for the
-                # gap_activity_types-eligible ones -- see _is_gap_eligible_type().
-                gap_eligible_subjects = [u for u in new_subjects if self._is_gap_eligible_type(u)]
-                reply = self._reply_from_gaps(gap_eligible_subjects) if gap_eligible_subjects else None
-                source_tag = "gap" if reply is not None else "default"
-                if reply is None:
-                    reply = _call_openai("generating the agent's reply", self.agent_fn, self._messages)
+                # Same idea, generalized to any OTHER intent-driven gap question (see
+                # self._pending_intent_answer's own comment) -- but here the classifier can also
+                # come back UNRELATED (the reply neither answers nor declines it, e.g. a
+                # clarifying question back), in which case _handle_intent_answer_reply() has
+                # already cleared the pending state and returns (False, None) to say "run this
+                # turn through the normal flow below instead, exactly as if there had been no
+                # pending intent answer at all."
+                handled, intent_answer_reply = (
+                    self._handle_intent_answer_reply(human_turn)
+                    if self._pending_intent_answer is not None else (False, None)
+                )
+                if handled:
+                    reply = intent_answer_reply
+                    source_tag = "gap"
+                    human_triples_pushed = self._pending_triples_pushed
+                else:
+                    # Record + annotate + push the human turn FIRST: whether the agent's reply is
+                    # a KG-grounded gap question depends on what (if anything) this turn just added.
+                    _, new_subjects, human_triples_pushed = self._annotate_and_push(human_turn)
+                    if new_subjects:
+                        self.last_subject_uris = new_subjects
+                    # last_subject_uris (above, for the graph panel) and triples_pushed cover
+                    # EVERY new subject regardless of type; gap-finding itself only runs for the
+                    # gap_activity_types-eligible ones -- see _is_gap_eligible_type().
+                    gap_eligible_subjects = [u for u in new_subjects if self._is_gap_eligible_type(u)]
+                    reply = self._reply_from_gaps(gap_eligible_subjects) if gap_eligible_subjects else None
+                    source_tag = "gap" if reply is not None else "default"
+                    if reply is None:
+                        reply = _call_openai("generating the agent's reply", self.agent_fn, self._messages)
         except ChatTimeoutError as exc:
             reply = self._timeout_reply(exc)
             self.reply_sources.append("timeout")
@@ -665,7 +710,13 @@ class KgChatSession(ChatSession):
             activity = extraction.activity
             if activity and activity.activity_id and activity.type:
                 uri = "http://cltl.nl/leolani/n2mu/" + activity.activity_id
+                is_new_subject = uri not in self._subject_types
                 self._subject_types[uri] = activity.type.value.replace(" ", "_")
+                # Fired exactly once per genuinely NEW activity_id -- never again on a later turn
+                # that just adds another role to one already known -- see self.on_new_subject's
+                # own comment in __init__.
+                if is_new_subject and self.on_new_subject:
+                    self.on_new_subject(uri, self._subject_types[uri])
             # self._subject_labels -- see its own comment in __init__. Only set when this
             # extraction actually carried a phrase of its own: a later, phrase-less reference to
             # an already-known activity (activity.value is None -- see
@@ -777,6 +828,13 @@ class KgChatSession(ChatSession):
         that case, arms self._pending_confirmation so the human's next turn is routed to
         _handle_confirmation_reply() instead of the normal annotate-and-push flow (see say()).
 
+        A gap that carries a "fill_role" (see intent_gap_finder._make_gap()'s own docstring --
+        never true for a kg_gap_finder.py gap, only ever for an intent_gap_finder.py one) arms
+        self._pending_intent_answer instead, the same idea generalized to a what/how much/where
+        requirement instead of a who one -- see _handle_intent_answer_reply(). The two are
+        mutually exclusive: an agent-like gap is always routed to the confirmation path, never
+        this one, regardless of whether it also happens to carry a "fill_role".
+
         Resets, then populates, self._pending_gap_queries/self._last_selected_gap for say()'s
         turn_log entry -- see the class docstring's "self.turn_log" paragraph. Both stay at their
         reset values ([] / None) if this returns None."""
@@ -797,6 +855,8 @@ class KgChatSession(ChatSession):
         reply = _call_openai("generating a knowledge-graph follow-up question", self.replier.reply, prompt)
         if gap["predicate"] in self._agent_predicates:
             self._pending_confirmation = (gap, kind, reply)
+        elif gap.get("fill_role"):
+            self._pending_intent_answer = (gap, kind, reply)
         return reply
 
     # ------------------------------------------------------------------- #
@@ -827,7 +887,8 @@ class KgChatSession(ChatSession):
                 return "deny_correct", value
         return "deny", None
 
-    def _push_gap_triple(self, gap: dict, role_value: str, role_type: str, human_turn: dict):
+    def _push_gap_triple(self, gap: dict, role_value: str, role_type: str, human_turn: dict,
+                          role_name: str = None):
         """Build a synthetic Output entry that adds exactly one role filler (gap's predicate) to
         gap's subject activity -- a bare reference to that already-known activity_id, not a new
         activity -- and push it to the KG via the normal capsule pipeline
@@ -842,9 +903,16 @@ class KgChatSession(ChatSession):
         entry's synthetic Input turn is always attributed to the human -- the same way it would
         if the human had literally said "I" in an extracted utterance, so confirming an assumed
         agent links to the human's own URI instead of a bare, unlinked "I" literal.
+
+        role_name defaults to gap["predicate"]'s own local name (the confirmation-flow case,
+        where that predicate is always a real, single RDF predicate URI, e.g. n2mu:agent) --
+        pass it explicitly for a gap whose "predicate" field is a display string, not a real
+        predicate (e.g. a qualification-aspect gap's own aspect name, "duration"), where the
+        real predicate to write to is instead named by the gap's own "fill_role" (see
+        intent_gap_finder._make_gap()) -- see _handle_intent_answer_reply().
         """
         activity_id = gap["subject"].rsplit("/", 1)[-1]
-        role_name = gap["predicate"].rsplit("/", 1)[-1]
+        role_name = role_name or gap["predicate"].rsplit("/", 1)[-1]
         output_entry = {
             "perspective": {"emotion": "neutral", "factuality": "confirm", "certainty": "certain"},
             "activity": {"activity_id": activity_id, "value": None, "offset": None, "length": None, "type": None},
@@ -920,6 +988,97 @@ class KgChatSession(ChatSession):
         prompt = self.replier._processor.get_prompt_for_kg_gap(gap, kind)
         return _call_openai("asking a follow-up question", self.replier.reply, prompt)
 
+    # ------------------------------------------------------------------- #
+    # Handling the human's answer to a pending (non-agent-like) intent gap question
+    # ------------------------------------------------------------------- #
+
+    def _classify_intent_answer_reply(self, question: str, reply_text: str):
+        """Classify a human reply to a pending intent-driven gap question (see
+        _reply_from_gaps()'s self._pending_intent_answer branch) as one of:
+          - ("answer", <value>) -- the reply answers the question; <value> is that answer.
+          - ("decline", None) -- the human indicated they don't have/didn't do/don't know this.
+          - ("unrelated", None) -- neither -- e.g. a clarifying question back, or a change of
+            subject (see get_instruct_for_intent_answer_response()'s own docstring on why this
+            third case matters here in a way it doesn't for a plain yes/no confirmation).
+        Falls back to ("unrelated", None) for anything the classifier LLM doesn't return in one
+        of the three expected forms, or an "ANSWER:" with no usable value after it -- the safe
+        choice, since it never pushes an unverified value to the KG, only lets the turn run
+        through the ordinary extraction pipeline instead."""
+        prompt = self.replier._processor.get_prompt_for_intent_answer_response(question, reply_text)
+        raw = (_call_openai(
+            "interpreting your answer to the follow-up question", self.replier.reply, prompt
+        ) or "").strip()
+        upper = raw.upper()
+        if upper.startswith("ANSWER"):
+            value = raw.split(":", 1)[1].strip() if ":" in raw else ""
+            if value:
+                return "answer", value
+        if upper.startswith("DECLINE"):
+            return "decline", None
+        return "unrelated", None
+
+    def _handle_intent_answer_reply(self, human_turn: dict):
+        """Handle the human's answer to self._pending_intent_answer (armed by _reply_from_gaps()
+        for a gap that carries a "fill_role" -- see intent_gap_finder._make_gap()'s own
+        docstring), generalizing _handle_confirmation_reply()'s idea (attach the answer directly
+        to the pending gap's own subject instead of relying on the general-purpose SRL extractor
+        to coreference a short follow-up reply back to it) to any what/how much/where
+        requirement, not just a who one:
+          - answer -> push the value onto the gap's own "fill_role" (see _push_gap_triple()) and
+            acknowledge (get_prompt_for_gap_filled_ack(), the same one the confirmation flow
+            uses).
+          - decline -> push nothing, drop the requirement, and acknowledge that instead of asking
+            again (get_prompt_for_gap_declined_ack()) -- unlike a plain agent-confirmation denial,
+            this deliberately does NOT fall back to re-asking the same question: a generic
+            what/how much/where requirement has no better "who" pivot to ask instead, and
+            re-asking it immediately is exactly the repeated-question failure mode this whole
+            mechanism exists to avoid (see KgIntentChatSession's own MAX_INTENT_GAP_ATTEMPTS
+            backstop for the belt-and-braces version of this, covering the cases this classifier
+            itself might still get wrong).
+          - unrelated -> push nothing, ask nothing here; returns (False, None) so say() runs the
+            turn through the normal annotate-and-push/gap-finding flow instead, exactly as if
+            there had been no pending intent answer at all (e.g. "what body function?" -- a
+            clarifying question back, not an answer or a decline).
+
+        Returns (handled, reply): (True, <text>) for answer/decline, (False, None) for unrelated.
+        If classifying the reply times out, self._pending_intent_answer is restored (the human's
+        answer was never actually read) before the ChatTimeoutError propagates to say(), same
+        reasoning as _handle_confirmation_reply()'s own restore.
+
+        For say()'s turn_log entry: sets self._last_selected_gap to the gap being resolved here,
+        self._pending_gap_queries to [] (no fresh gap-finder query happens on this path), and
+        self._pending_triples_pushed to whatever _push_gap_triple() ends up pushing (empty on a
+        decline or an unrelated reply)."""
+        gap, kind, question = self._pending_intent_answer
+        self._pending_intent_answer = None
+        self._pending_gap_queries = []
+        self._last_selected_gap = {
+            "subject": gap["subject"], "predicate": gap["predicate"], "kind": kind,
+            "peer_coverage": gap.get("peer_coverage"),
+        }
+        self._pending_triples_pushed = []
+        try:
+            verdict, value = self._classify_intent_answer_reply(question, human_turn["utterance"])
+        except ChatTimeoutError:
+            self._pending_intent_answer = (gap, kind, question)
+            raise
+
+        if verdict == "answer":
+            _, self._pending_triples_pushed = self._push_gap_triple(
+                gap, role_value=value, role_type=gap.get("fill_role_type"), human_turn=human_turn,
+                role_name=gap["fill_role"],
+            )
+            ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, value)
+            return True, _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
+
+        if verdict == "decline":
+            ack_prompt = self.replier._processor.get_prompt_for_gap_declined_ack(gap)
+            return True, _call_openai(
+                "acknowledging that you don't have this", self.replier.reply, ack_prompt
+            )
+
+        return False, None
+
 
 # --------------------------------------------------------------------------- #
 # KgIntentChatSession
@@ -945,6 +1104,19 @@ class KgIntentChatSession(KgChatSession):
     question runs through the normal incremental extractor next turn -- see the class docstring
     on cross-turn coreference); nothing here needs its own push path.
 
+    Two mechanisms guard against the same intent question repeating even though it was already
+    answered (or declined) -- the incremental SRL extractor doesn't reliably coreference a short
+    follow-up reply ("30 minutes", "no") back onto the SAME activity/role the question was about,
+    which otherwise lets the identical gap resurface, unrecognized, on a freshly-minted subject
+    next turn:
+      - KgChatSession._handle_intent_answer_reply() (armed via a gap's own "fill_role" -- see
+        intent_gap_finder._make_gap()) attaches the human's very next reply directly to the
+        PENDING gap's own subject/role instead of relying on that coreference at all -- the
+        primary fix, for the common case.
+      - _fetch_gap_queue()'s own MAX_INTENT_GAP_ATTEMPTS backstop caps how many times the SAME
+        underlying requirement (independent of which subject surfaces it) is ever asked about
+        this chat, regardless -- the safety net for whatever the first mechanism still misses.
+
     self.intents holds the loaded intent definitions (see intent_gap_finder.load_intents()) --
     an activity type NOT covered by any of them (intent_gap_finder.find_intent() returns None)
     is simply never gap-driven: its turns are still annotated/pushed to the graph like any
@@ -959,7 +1131,7 @@ class KgIntentChatSession(KgChatSession):
 
     def __init__(self, chat, human, kg_address, log_dir="kg_logs", date=None, agent_fn=None,
                  system_prompt=None, extractor=None, replier=None, intents=None, intents_dir=None,
-                 clear_all=False):
+                 clear_all=False, on_new_subject=None):
         """Same parameters as KgChatSession, minus gap_threshold/gap_activity_types (not
         meaningful here -- there's no peer voting, and eligibility is decided by intent match,
         not an allow-list), plus:
@@ -974,6 +1146,7 @@ class KgIntentChatSession(KgChatSession):
             chat=chat, human=human, kg_address=kg_address, log_dir=log_dir, date=date,
             agent_fn=agent_fn, system_prompt=system_prompt, extractor=extractor, replier=replier,
             gap_threshold=0.0, gap_activity_types=None, clear_all=clear_all,
+            on_new_subject=on_new_subject,
         )
         # There's no peer voting here (see the class docstring), so gap_threshold is never read
         # by anything this class actually does -- dropped, not just left at 0.0, so
@@ -984,6 +1157,15 @@ class KgIntentChatSession(KgChatSession):
         deps = _load_kg_dependencies()
         self._intent_gap_finder = deps["intent_gap_finder"]
         self.intents = intents if intents is not None else self._intent_gap_finder.load_intents(intents_dir)
+        # (id(intent), kind, gap["predicate"]) -> how many times that requirement has been
+        # surfaced so far this chat -- see MAX_INTENT_GAP_ATTEMPTS/_fetch_gap_queue(). Keyed by
+        # id(intent) (object identity, stable for this session's own self.intents list) rather
+        # than activity_type alone, so several distinct intents that share one activity_type
+        # (e.g. symptom_intents.json's several label-disambiguated symptom intents -- see
+        # find_intent()) each get their own independent attempt count, instead of e.g. a
+        # "headache" duration question and an unrelated "dizziness" duration question wrongly
+        # sharing one counter just because both are typed "symptom".
+        self._intent_requirement_attempts = {}
 
     def _is_gap_eligible_type(self, subject_uri) -> bool:
         """Overrides KgChatSession's allow-list check: eligible exactly when
@@ -1002,22 +1184,43 @@ class KgIntentChatSession(KgChatSession):
         _is_gap_eligible_type()-eligible subjects) instead of a peer-statistics kg_gap_finder
         query. An intent's own checks already run in priority order and stop at the first unmet
         one (see next_intent_gap()'s docstring), so the "queue" this returns is always length 0
-        or 1 -- _next_gap() drains it exactly the same way regardless."""
+        or 1 -- _next_gap() drains it exactly the same way regardless.
+
+        MAX_INTENT_GAP_ATTEMPTS backstop: a found gap's "requirement key" --
+        (id(intent), kind, gap["predicate"]) -- identifies the SAME underlying requirement (e.g.
+        "measurement's missing patient", "exercise's duration") independent of which subject_uri
+        surfaced it. Unlike self._asked_gap_keys (scoped to one subject_uri, so a freshly-minted,
+        unrelated subject always looks like a brand-new gap -- exactly the repeated-question
+        failure mode this exists to catch), this counter persists across every subject that ever
+        surfaces this requirement for the rest of the chat. Once it's been surfaced
+        MAX_INTENT_GAP_ATTEMPTS times, the intent gives up on it silently (found stays empty,
+        "gave_up": True is logged for visibility) -- the activity's own turns are still
+        annotated/pushed to the graph as normal, only this one requirement stops being asked
+        about."""
         activity_type = self._subject_types.get(subject_uri)
         activity_label = self._subject_labels.get(subject_uri)
         intent = self._intent_gap_finder.find_intent(activity_type, self.intents, activity_label=activity_label)
         found = []
+        gave_up = False
         if intent is not None:
             graph = self._kg_gap_finder.load_graph_from_endpoint(self.kg_address)
             next_gap = self._intent_gap_finder.next_intent_gap(graph, subject_uri, intent, activity_type=activity_type)
             if next_gap is not None:
-                found = [next_gap]
+                gap, kind = next_gap
+                requirement_key = (id(intent), kind, gap["predicate"])
+                attempts = self._intent_requirement_attempts.get(requirement_key, 0)
+                if attempts >= MAX_INTENT_GAP_ATTEMPTS:
+                    gave_up = True
+                else:
+                    self._intent_requirement_attempts[requirement_key] = attempts + 1
+                    found = [next_gap]
         found = [(g, kind) for g, kind in found if self._gap_key(g) not in self._asked_gap_keys]
         self._pending_gap_queries.append({
             "subject": subject_uri,
             "activity_type": activity_type,
             "intent_source": intent.get("_source_file") if intent else None,
             "after_dedup": len(found),
+            "gave_up": gave_up,
         })
         return found
 
@@ -1032,9 +1235,10 @@ class KgIntentChatSession(KgChatSession):
             for t in entry["triples_pushed"]:
                 print(f"      {t['subject']}  {t['predicate']}  =  {t['object']}")
         for q in entry["gap_queries"]:
+            gave_up_note = " GAVE UP (max attempts reached)" if q.get("gave_up") else ""
             print(
                 f"    intent gap query: subject={q['subject']} activity_type={q['activity_type']} "
-                f"intent={q['intent_source']} after_dedup={q['after_dedup']}"
+                f"intent={q['intent_source']} after_dedup={q['after_dedup']}{gave_up_note}"
             )
         if entry["selected_gap"]:
             g = entry["selected_gap"]
