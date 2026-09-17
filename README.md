@@ -29,13 +29,18 @@ agent asks for **confirmation** ("Just to confirm, was that you...?") — a conf
 correction reply is turned straight back into a KG triple instead of prompting yet another
 question.
 
-Driven from two short notebooks under `notebooks/` — **[`chat_session.ipynb`](notebooks/chat_session.ipynb)**
-(plain chat) and **[`kg_chat_session.ipynb`](notebooks/kg_chat_session.ipynb)** (KG-populating
-chat) — both importing `ChatSession`/`KgChatSession` from **[`notebooks/chat_sessions.py`](notebooks/chat_sessions.py)**,
-which in turn wires together the two independent pipelines living under `src/cltl/`. Both
-notebooks drive their live chat through **[`notebooks/kg_chat_gui.py`](notebooks/kg_chat_gui.py)**:
-a single Tkinter window showing the whole transcript, with the human typing into that same
-window instead of the notebook's own `input()` prompt.
+Driven from short notebooks under `notebooks/` — **[`chat_session.ipynb`](notebooks/chat_session.ipynb)**
+(plain chat), **[`kg_chat_session.ipynb`](notebooks/kg_chat_session.ipynb)** (KG-populating chat,
+peer-statistics gaps), **[`kg_intent_chat.ipynb`](notebooks/kg_intent_chat.ipynb)** (KG-populating
+chat, hand-authored **intent**-driven gaps instead) and
+**[`kg_catchup_intent_chat.ipynb`](notebooks/kg_catchup_intent_chat.ipynb)** (the intent-driven
+chat, but opening with an LLM-phrased "what's happened since we last spoke?" turn) — all importing
+`ChatSession`/`KgChatSession`/`KgIntentChatSession` from
+**[`notebooks/chat_sessions.py`](notebooks/chat_sessions.py)**, which in turn wires together the
+two independent pipelines living under `src/cltl/`. All four notebooks drive their live chat
+through **[`notebooks/kg_chat_gui.py`](notebooks/kg_chat_gui.py)**: a single Tkinter window
+showing the whole transcript, with the human typing into that same window instead of the
+notebook's own `input()` prompt.
 
 ## Contents
 
@@ -44,7 +49,9 @@ window instead of the notebook's own `input()` prompt.
 - [The turn schema](#the-turn-schema)
 - [`src/cltl/events_from_chat/` — chat → semantic roles → knowledge graph](#srclcltleventsfromchat--chat--semantic-roles--knowledge-graph)
 - [`src/cltl/chat_from_kg/` — knowledge graph → gap → reply](#srclcltlchatfromkg--knowledge-graph--gap--reply)
+- [Intent-driven gaps: `intent_gap_finder.py`](#intent-driven-gaps-intent_gap_finderpy)
 - [`notebooks/` — putting it together](#notebooks--putting-it-together)
+- [Catch-up opening flow: `catch_up_from_kg.py`](#catch-up-opening-flow-catch_up_from_kgpy)
 - [Setup](#setup)
 - [Known rough edges](#known-rough-edges)
 
@@ -52,17 +59,30 @@ window instead of the notebook's own `input()` prompt.
 
 1. Install `requirements.txt` into a virtualenv (`.venv` is already set up in this repo).
 2. Have a GraphDB (or other SPARQL 1.1) repository running and reachable, e.g.
-   `http://localhost:7200/repositories/event_sandbox` — only needed for `kg_chat_session.ipynb`.
+   `http://localhost:7200/repositories/event_sandbox` — needed for every notebook except
+   `chat_session.ipynb`.
 3. `export OPENAI_API_KEY=...` (required — several modules read it at *import* time, not just
    when a client is constructed).
-4. Open `notebooks/chat_session.ipynb` for a plain chat, or `notebooks/kg_chat_session.ipynb` for
-   the KG-populating version, and run the cells top to bottom. `chat_session.ipynb` only needs
-   OpenAI, or nothing at all if you use the built-in `mock_agent`; `kg_chat_session.ipynb` needs
-   both OpenAI and the knowledge graph. The live-chat cell in each opens its own window (needs a
-   display and Tkinter — see [`notebooks/kg_chat_gui.py`](notebooks/kg_chat_gui.py)); type there,
-   or type "bye" (or click **Quit**) to end the conversation and let the cell finish. Quitting
-   writes the transcript and a statistics summary to two timestamped JSON files next to the
-   notebook and prints their paths.
+4. Open one of the notebooks and run the cells top to bottom:
+   - `notebooks/chat_session.ipynb` — plain chat, needs OpenAI only (or nothing at all with the
+     built-in `mock_agent`).
+   - `notebooks/kg_chat_session.ipynb` — KG-populating chat whose follow-up questions come from
+     `kg_gap_finder.py`'s peer-statistics gaps.
+   - `notebooks/kg_intent_chat.ipynb` — the same KG-populating chat, but follow-up questions come
+     from hand-authored **[`intents/`](intents/)** definitions instead (see
+     [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy)) — works even for the very
+     first activity of a kind ever pushed to the graph, unlike the peer-statistics version.
+   - `notebooks/kg_catchup_intent_chat.ipynb` — the intent-driven chat above, but it first queries
+     the graph for when this human last talked at all and opens with an LLM-phrased catch-up
+     question about what's happened since (see [Catch-up opening
+     flow](#catch-up-opening-flow-catch_up_from_kgpy)) — most useful against a graph that already
+     has some history for the human in question.
+
+   All four need the knowledge graph except `chat_session.ipynb`. The live-chat cell in each opens
+   its own window (needs a display and Tkinter — see
+   [`notebooks/kg_chat_gui.py`](notebooks/kg_chat_gui.py)); type there, or type "bye" (or click
+   **Quit**) to end the conversation and let the cell finish. Quitting writes the transcript and a
+   statistics summary to two timestamped JSON files next to the notebook and prints their paths.
 
 ## Pipeline overview
 
@@ -255,6 +275,71 @@ exactly one of `CONFIRM` / `DENY` / `CORRECT: <value>` — and:
 Any classifier output that isn't cleanly one of the three forms is treated as a plain `DENY` —
 the safe default, since it never pushes an unverified triple.
 
+## Intent-driven gaps: `intent_gap_finder.py`
+
+`kg_gap_finder.py`'s own gaps (above) only fire once a **majority** of an activity's peers already
+have the predicate in question — so the very first `take_food` activity ever pushed to the graph
+can never produce one, even though a diet-coaching intent obviously wants to know what was eaten.
+**[`src/cltl/chat_from_kg/intent_gap_finder.py`](src/cltl/chat_from_kg/intent_gap_finder.py)**
+sidesteps that: instead of deriving "what's expected" from peer statistics, it reads it straight
+from a hand-authored **intent** — one JSON object per `data_type.ActivityType` value (`take_food`,
+`exercise`, `physical_condition`, ...), loaded from one `*.json` file per topic under
+**[`intents/`](intents/)** at the project root (`diet_intents.json`, `exercise_intents.json`,
+`condition_intents.json`, `medication_intents.json`, `measurement_intents.json`,
+`sleep_intents.json`, `symptom_intents.json`) — independent of how many (if any) similar
+activities already exist in the graph.
+
+An intent looks like this (`intents/diet_intents.json`, trimmed):
+
+```json
+{
+  "activity_types": ["take_food"],
+  "patient_type": ["food"],
+  "patient_question": "What do you have for {activity}?",
+  "activity_date": "date",
+  "date_question": "When did you have your {activity}",
+  "secondary_objectives": {
+    "patient_qualification": "quantity",
+    "qualification_question": "how much {patient} did you have?"
+  }
+}
+```
+
+`next_intent_gap()` checks an intent's own requirements in a **fixed priority order**, stopping at
+(and returning) the first one not yet met — "the data elements for the intent must first be met
+before moving on with the conversation":
+
+1. **`patient_type`** — the activity must have a `patient` of one of these role-filler types (what
+   was eaten/drunk/taken/measured, e.g. `["food"]`, `["medication"]`).
+2. **`activity_qualification`** — one `qualification` value per named aspect, in order (e.g.
+   `["duration", "degree"]` for a condition — first "how long", then "how strong", never both at
+   once, since the graph model has no way to tell which existing `qualification` value answers
+   which aspect other than the order they were asked in).
+3. **`activity_date`** — any `time` value at all.
+4. **`secondary_objectives`** — only reached once 1–3 are *all* satisfied; each `{key: value}` is
+   another `*_qualification`/`*_location`/`*_date`/generic-predicate check, tried in the object's
+   own order (e.g. diet's `"patient_qualification": "quantity"` — *how much* — asked only once
+   *what* was eaten and *when* are both already known).
+
+Every requirement may carry its own hand-authored `*_question` example (`patient_question`,
+`qualification_question` — a single template or a `{aspect: template}` mapping, `date_question`,
+`location_question`) with `{activity}`/`{patient}`/`{patient_type}` placeholders — the LLM
+paraphrases *that* instead of inventing a question from the bare subject/predicate/type triple,
+which is what actually stops a weaker LLM backend from leaking a raw role name like "patient" into
+the question it asks.
+
+**`activity_labels`** disambiguates several intents that share one `activity_types` entry by the
+activity's own label/phrase instead — needed because `data_type.ActivityType` has only one generic
+`symptom` type covering many distinct real symptoms. `symptom_intents.json` declares five separate
+intents all typed `symptom`, each naming the one symptom phrase (`"headache"`, `"dizziness"`, ...)
+its own `activity_labels` covers; if a symptom's phrase doesn't match any of them, `find_intent()`
+deliberately returns no match (rather than guessing one) so nothing asks about, say, a `body_part`
+location that doesn't apply to whatever the real symptom turns out to be.
+
+**No intent covers this activity type at all** (or none of several label-specific candidates
+matched) → the same "fall back to the plain LLM reply" behaviour as `kg_gap_finder.py` finding
+nothing.
+
 ## `notebooks/` — putting it together
 
 `notebooks/chat_sessions.py` is a plain Python module (not a notebook) holding the two classes
@@ -268,10 +353,14 @@ constructed, not on import.
 | `chat_sessions.py` — setup | `_load_key()`, `_openai_client()`, `_today()`, `default_system_prompt(human)`, `openai_agent(model)` — an `agent_fn(messages) -> str` backed by OpenAI chat completions. |
 | `chat_sessions.py` — `ChatSession` | One conversation. `say(utterance)` records a human turn, gets one agent turn in reply via `agent_fn`, appends both as flat turn dicts. `run_interactive()` drives that from `input()` in a loop. `as_conversation()` returns the nested `{chat, human, date, turns: [...]}` shape `annotate_all_turns_in_conversation` expects. |
 | `chat_sessions.py` — demo helpers | `mock_agent(messages)` (no API key needed) and `simulate_chat(...)`, for exercising the turn format without typing anything; `save_turns(turns, path)` to write JSON. |
-| `chat_sessions.py` — `KgChatSession` | The full KG loop (see below). |
+| `chat_sessions.py` — `KgChatSession` | The full KG loop, peer-statistics gaps (see below). |
+| `chat_sessions.py` — `KgIntentChatSession` | Same loop, but follow-up questions come from `intent_gap_finder.py` instead — see [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy) and below. |
+| `catch_up_from_kg.py` | The opening "what's happened since we last spoke?" phase, built on `gaps_from_kg/get_temporal_containers.py` — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
 | `kg_chat_gui.py` | `run_gui(session)`: opens one Tkinter window (`ChatWindow`) for a `ChatSession`/`KgChatSession` — the whole transcript scrolls on the left, and the human types into an entry box built into the *same* window (no `input()`, no popup). Each agent turn is tagged **[KG]**/**[LLM]** from `session.reply_sources` (a plain `ChatSession` has none, so it's always **[LLM]**). For a `KgChatSession`, a **Gap sensitivity** slider adjusts `session.gap_threshold` live, mid-conversation — dragging it also drops any already-cached per-instance gap queues, so the new sensitivity takes effect on the very next gap lookup rather than only once whatever was already queued happens to drain (`_on_gap_threshold_change`); not shown for a plain `ChatSession`, which has no `gap_threshold`. A **Text size** slider (always shown, 16pt default) live-resizes the whole conversation area at once via shared `tkinter.font.Font` objects. When `session.kg_address` is a GraphDB repository, the window splits and a live **graph panel** appears on the right (see below), with its own independent **Font size** slider. Talking to the graph/LLM runs on a background thread per turn so the window never freezes; the entry box is never disabled, so a quit word ("bye" etc., checked first in `_on_send`) or the always-enabled **Quit** button closes the window immediately even if a reply is stuck (`_on_close` calls `root.quit()` before `root.destroy()` — destroy alone doesn't reliably end a `mainloop()` that Jupyter is driving, which left the window up and the cell hanging). Quitting also writes the transcript and a statistics summary to timestamped JSON files via `save_session()`/`session_statistics()` — plus, for a `KgChatSession`, its per-turn `turn_log` (see below) as a third file — (`save_dir=None` disables). Returns `session.turns`, so it's a drop-in replacement for `run_interactive()` in a notebook cell. |
 | `chat_session.ipynb` | Imports `ChatSession`/`mock_agent`/`simulate_chat`/`save_turns`/`run_gui` and runs a plain chat: live (`run_gui(ChatSession(...))`) or scripted (`simulate_chat()`), then inspects/saves the resulting turns. |
 | `kg_chat_session.ipynb` | Imports `KgChatSession`/`run_gui`, sets `KG_ADDRESS`/`KG_LOG_DIR`, and runs a live KG-populating chat, then inspects `annotations`/`kg_pushes`/`reply_sources`. |
+| `kg_intent_chat.ipynb` | Same as `kg_chat_session.ipynb`, but constructs `KgIntentChatSession` (`intents_dir=` defaults to the project's own `intents/`) instead of `KgChatSession` — no `gap_threshold`/`gap_activity_types` (not meaningful here; see [Intent-driven gaps](#intent-driven-gaps-intent_gap_finderpy)) — and its `turn_log` prints an `intent gap query: ...` line (matched intent + `activity_type`) instead of `kg_gap_finder`'s peer-vote breakdown. |
+| `kg_catchup_intent_chat.ipynb` | Builds a `KgIntentChatSession` exactly like `kg_intent_chat.ipynb`, but first runs `catch_up_from_kg.py`'s queries and opens with `kg_session.open_with(opening_question)` before starting the live chat — see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy). |
 
 ### `KgChatSession(ChatSession)`
 
@@ -356,6 +445,42 @@ kg_session = KgChatSession(
     kg_address="http://localhost:7200/repositories/event_sandbox",
 )
 run_gui(kg_session)   # opens the chat window; type as the human, the agent replies each turn
+```
+
+### `KgIntentChatSession(KgChatSession)`
+
+Swaps only the gap-*finding* step for `intent_gap_finder.py` (see [Intent-driven
+gaps](#intent-driven-gaps-intent_gap_finderpy)) — everything else (annotating/pushing turns,
+agent-confirmation handling, timeouts, the rest of `turn_log`) is unchanged, since an intent's
+answer is annotated back onto the graph exactly the same way an ordinary `kg_gap_finder` gap's
+answer is:
+
+- **`_is_gap_eligible_type(subject_uri)`** — eligible exactly when `intent_gap_finder.find_intent()`
+  finds a matching intent for that subject's activity type (and, if several intents share it, its
+  own label — e.g. several distinct symptoms) — instead of `KgChatSession`'s
+  `gap_activity_types` allow-list.
+- **`_fetch_gap_queue(subject_uri)`** — one `intent_gap_finder.next_intent_gap()` call for the
+  matching intent instead of a peer-statistics `kg_gap_finder.analyze()` call. An intent's own
+  checks already run in priority order and stop at the first unmet one, so the "queue" this
+  returns is always length 0 or 1 — `_next_gap()` drains it exactly the same way regardless.
+- **`turn_log`'s `gap_queries` entries** are shaped `{"subject", "activity_type",
+  "intent_source", "after_dedup"}` (which `intents/*.json` file matched, if any) instead of
+  `kg_gap_finder`'s peer-vote fields (`threshold`/`found`) — there's no peer voting to report here.
+
+`self.intents` holds the loaded intent definitions (`intent_gap_finder.load_intents()`); an
+activity type covered by none of them is never gap-driven — its turns are still
+annotated/pushed to the graph like any other, but the agent's reply for it always falls back to
+the plain default `agent_fn`.
+
+```python
+from kg_chat_gui import run_gui
+
+kg_session = KgIntentChatSession(
+    chat=1, human="Mehmet",
+    kg_address="http://localhost:7200/repositories/event_sandbox",
+    intents_dir=None,   # None auto-discovers the project's own intents/ folder
+)
+run_gui(kg_session)
 ```
 
 Two directories with a same-named flat module (`events_from_chat/prompts.py` and
@@ -494,6 +619,69 @@ GraphDB fetch can complete in a few milliseconds. Deferring the thread's *start*
 `root.after(0, ...)`, itself always safe to call before `mainloop()`, guarantees the loop is
 already running by the time that thread's own `.after()` call happens.
 
+## Catch-up opening flow: `catch_up_from_kg.py`
+
+`kg_intent_chat.ipynb` (and `kg_chat_session.ipynb`) both start a live chat cold — the human has
+to bring up whatever they want to talk about themselves. **[`notebooks/catch_up_from_kg.py`](notebooks/catch_up_from_kg.py)**
+adds an opening phase on top of `KgIntentChatSession`, driven from
+**[`src/cltl/gaps_from_kg/get_temporal_containers.py`](src/cltl/gaps_from_kg/get_temporal_containers.py)**
+— a *different* query layer over the same GraphDB repository (`cltl.brain.LongTermMemory`'s own
+SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by
+`kg_catchup_intent_chat.ipynb`:
+
+1. **`find_last_conversation_date(human, brain, current_date, fallback_date)`** — wraps
+   `get_temporal_containers.get_last_conversation_date()`: the most recent date this human is on
+   record as having spoken at all, or `fallback_date` if the graph has none (e.g. a brand new
+   human).
+2. **`find_catch_up_topics(brain, current_date, recent_date)`** — for every activity/condition
+   type `chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES` already covers, runs
+   `get_temporal_containers.get_temporal_containers()` and keeps the ones with real **history**
+   (something dated before the last conversation) and nothing already in the **gap** bucket
+   (dated between then and now) — sorted most-recently-discussed first.
+3. **`render_opening_question(...)`** — one LLM call that phrases the actual first turn: how long
+   it's been, and an invitation to share what's happened since, naming the `lead_topics` (default
+   2) most-recent topics as concrete memory prompts.
+4. **`CatchUpQueue`** — the *remaining* topics, handed out one at a time via `next_question()`.
+5. **`wrap_agent_fn_with_catch_up(agent_fn, queue)`** — wraps a plain `agent_fn` so that every
+   call to it (which `KgChatSession.say()` only ever makes once it's found no per-turn intent gap
+   to ask about — the `"default"` `reply_sources` case) asks the next queued catch-up topic
+   instead, until the queue runs out; then it's a no-op passthrough. This is the **only**
+   integration point — `chat_sessions.py`/`KgIntentChatSession` need no changes at all, since
+   `agent_fn` is already a pluggable constructor parameter.
+
+The moment the human mentions an actual new activity/condition — whether in reply to the opening
+question, a queued catch-up topic, or anything else — `KgIntentChatSession`'s own per-turn flow
+takes over for it completely unchanged (SRL extraction → push to the KG →
+`intent_gap_finder.next_intent_gap()`). This module only ever supplies the opening turn and fills
+in for the *default* reply; it never competes with an actual intent-driven gap question.
+
+```python
+import catch_up_from_kg as catch_up
+from chat_sessions import KgIntentChatSession, openai_agent
+
+brain = catch_up.connect_brain(KG_ADDRESS, log_dir=KG_LOG_DIR)
+last_date = catch_up.find_last_conversation_date("Mehmet", brain, CURRENT_DATE, FALLBACK_DATE)
+topics = catch_up.find_catch_up_topics(brain, CURRENT_DATE, last_date)
+
+opening_question = catch_up.render_opening_question("Mehmet", CURRENT_DATE, last_date, topics)
+queue = catch_up.CatchUpQueue(topics[2:], human="Mehmet")   # topics[:2] are already in the opener
+agent_fn = catch_up.wrap_agent_fn_with_catch_up(openai_agent(), queue)
+
+kg_session = KgIntentChatSession(chat=1, human="Mehmet", kg_address=KG_ADDRESS, agent_fn=agent_fn)
+kg_session.open_with(opening_question)
+```
+
+**Known caveat:** `gaps_from_kg/thought_util.py`'s `get_sem_relation_query()` /
+`get_role_relation_query()` / `get_perspective_query()` write predicates as e.g. `<sem:hasActor>`
+— a *prefixed* name wrapped in angle brackets, which SPARQL parses as a literal absolute IRI
+rather than expanding it via the declared `sem:` prefix, so those lookups may never match the real
+`http://semanticweb.cs.vu.nl/2009/11/sem/hasActor`-style triples `cltl.brain` actually writes.
+If so, every activity `get_temporal_containers()` looks at lands in its "unknown" (dateless)
+bucket instead of "history"/"gap", and `find_catch_up_topics()` finds nothing to catch up on.
+Worth checking against your own GraphDB repository before relying on this flow surfacing real
+topics; this is pre-existing behaviour in `gaps_from_kg/`, not something `catch_up_from_kg.py`
+introduces.
+
 ## Setup
 
 - **Python deps**: `requirements.txt` (torch/transformers/sentence_transformers are only needed
@@ -504,7 +692,13 @@ already running by the time that thread's own `.after()` call happens.
   level) — set it before importing, not just before calling anything.
 - **A SPARQL endpoint**: `populate_ekg_from_annotations` and `kg_gap_finder.analyze` both need
   one reachable (e.g. a local GraphDB `event_sandbox` repository). `KgChatSession` fails loudly
-  if it isn't.
+  if it isn't. `catch_up_from_kg.py` needs the same endpoint already holding some history for the
+  human in question, or its catch-up phase has nothing to surface (see [Catch-up opening
+  flow](#catch-up-opening-flow-catch_up_from_kgpy)).
+- **`intents/` at the project root**: only needed for `KgIntentChatSession`
+  (`kg_intent_chat.ipynb`/`kg_catchup_intent_chat.ipynb`) — auto-discovered from the notebook's own
+  working directory (`intent_gap_finder._default_intents_dir()`); pass `intents_dir=` to use a
+  different set.
 - **Ollama** (optional): only needed if you construct an `LLMTripleReplier(backend="ollama")`
   instead of the default `backend="openai"` used by `KgChatSession`.
 - **Tkinter**: the live-chat cells open a window via `kg_chat_gui.py`, so a display is needed
@@ -554,6 +748,14 @@ already running by the time that thread's own `.after()` call happens.
   or fallback question. `_push_gap_triple` also always types a confirmed/corrected agent as
   `RoleType.person` — reasonable for "my son"/"my daughter"-style corrections, but not checked
   against what the correction actually says.
+- **An intent's `activity_types`/`activity_labels` must match the graph's own spelling exactly**
+  (after `intent_gap_finder._normalize()`'s case/`-`/`_`/space folding) — an `intents/*.json` file
+  covering a real `data_type.ActivityType` value under a slightly different spelling silently
+  matches nothing, and that activity type just never gets an intent-driven follow-up (falls back
+  to the plain LLM reply) with no error anywhere to flag the mismatch.
+- **`gaps_from_kg/`'s temporal queries may never find a date** — see the caveat at the end of
+  [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy) about
+  `thought_util.py`'s `<sem:hasActor>`-style queries not expanding the `sem:` prefix.
 - **The graph panel's plain-text triples aren't the actual GraphDB Visual graph** — see [Split-
   screen graph panel](#split-screen-graph-panel) for why a real embed isn't practical in Tkinter;
   "Open in GraphDB ↗" is the only way to see the real, interactive view. It also adds one SPARQL
