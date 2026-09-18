@@ -65,9 +65,16 @@ Module contents:
   pushed, which DOES need one small, additive hook: chat_sessions.KgChatSession's own
   `on_new_subject` constructor parameter (see its docstring), called exactly once per genuinely
   NEW activity_id (never on a later turn that just adds another role to one already known).
+- save_intent_log() -- writes one JSON file per chat under notebooks/intents_log/ (see its own
+  docstring)
+  summarizing the whole session after it ends: the gap itself, the catch-up topics identified
+  before the chat began, how each of them actually fared live, and every intent_gap_finder.py
+  intent the per-turn flow consulted along the way.
 """
 
+import json
 import math
+import re
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -535,3 +542,129 @@ def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
             return tracker.wrap_up_message()
         return agent_fn(messages)
     return _wrapped
+
+
+# --------------------------------------------------------------------------- #
+# Post-chat summary: the "intent log"
+# --------------------------------------------------------------------------- #
+
+def _serialize_topic(topic: Dict) -> Dict:
+    """One find_catch_up_topics()-shaped topic dict, made JSON-safe (`latest_date`'s datetime ->
+    ISO 8601 string) -- used for both "topics_at_start" and (via SaturationTracker.targets)
+    "topics_covered" in save_intent_log()."""
+    serialized = dict(topic)
+    if isinstance(serialized.get("latest_date"), datetime):
+        serialized["latest_date"] = serialized["latest_date"].isoformat()
+    return serialized
+
+
+def _topics_covered_from_tracker(tracker: "SaturationTracker") -> List[Dict]:
+    """One entry per SaturationTracker topic, summarizing how the LIVE chat actually went for it:
+    how many of it were reported, how many times it was asked about, and whether it ended up
+    "target_met" (expected_count actually reached) or just "capped_out" (MAX_ASKS_PER_TOPIC hit
+    without ever reaching it) -- either one satisfies is_saturated() for that topic, but they mean
+    different things (see SaturationTracker's own docstring)."""
+    return [
+        {
+            "activity_type": activity_type,
+            "expected_count": target["expected_count"],
+            "reported_count": tracker.reported[activity_type],
+            "asked_count": tracker.asked[activity_type],
+            "target_met": tracker.reported[activity_type] >= target["expected_count"],
+            "capped_out": tracker.asked[activity_type] >= tracker.MAX_ASKS_PER_TOPIC,
+        }
+        for activity_type, target in tracker.targets.items()
+    ]
+
+
+def _intents_covered_from_turn_log(turn_log: List[Dict]) -> List[Dict]:
+    """Every intent_gap_finder.py intent actually consulted during the chat's own per-turn flow,
+    summarized from chat_sessions.KgIntentChatSession.turn_log's own "gap_queries" entries (each
+    shaped {"subject", "activity_type", "intent_source", "after_dedup", "gave_up"} -- see
+    KgIntentChatSession._fetch_gap_queue()). One entry per DISTINCT "intent_source" file matched
+    at least once, listing which activity type(s) it covered THIS chat, how many times it was
+    queried, and whether MAX_INTENT_GAP_ATTEMPTS ever made it give up on one of its own
+    requirements (see chat_sessions.py's own "Why the same question doesn't repeat"). Independent
+    of the catch-up topics/SaturationTracker above -- an intent fires for ANY matching activity
+    the human mentions, whether or not the saturation loop is what prompted it; a plain
+    KgChatSession's turn_log (no "intent_source"/"gave_up" keys at all) yields an empty list.
+    """
+    covered: Dict[str, Dict] = {}
+    for entry in turn_log:
+        for query in entry.get("gap_queries") or []:
+            source = query.get("intent_source")
+            if not source:
+                continue
+            info = covered.setdefault(source, {
+                "intent_source": source, "activity_types": set(), "queries": 0, "gave_up": False,
+            })
+            if query.get("activity_type"):
+                info["activity_types"].add(query["activity_type"])
+            info["queries"] += 1
+            if query.get("gave_up"):
+                info["gave_up"] = True
+    return [
+        {**info, "activity_types": sorted(info["activity_types"])}
+        for info in sorted(covered.values(), key=lambda i: i["intent_source"])
+    ]
+
+
+def save_intent_log(kg_session, tracker: "SaturationTracker", catch_up_topics: List[Dict],
+                     current_date: datetime, recent_date: datetime,
+                     log_dir: str = "intents_log") -> Path:
+    """Write one JSON file to `log_dir` (created if needed -- default "intents_log", resolved
+    relative to the caller's own CWD, same convention as connect_brain()'s "kg_logs" default;
+    typically notebooks/intents_log/, since a notebook's CWD is its own directory) summarizing
+    this whole catch-up + intent-driven chat session, once it's over:
+
+    - "gap" -- the TRUE gap since the last conversation (`recent_date`/`current_date`/`gap_days`)
+      alongside the (possibly capped -- see MAX_SATURATION_GAP_DAYS) period this session actually
+      tried to saturate (`effective_recent_date`/`effective_gap_days`).
+    - "topics_at_start" -- find_catch_up_topics()'s own raw output, unchanged: every topic
+      identified as worth catching up on BEFORE the chat began, with its saturation target
+      (expected_count/weekly_rate/initial_reported_count -- see that function's own docstring).
+    - "topics_covered" -- how each of those topics actually fared LIVE
+      (_topics_covered_from_tracker()), `tracker.asked_log` (one entry per catch-up question
+      actually asked, in order, from SaturationTracker's own bookkeeping), whether the whole
+      tracker ended up saturated, and whether the chat ever reached wrap_up_message() (see
+      SaturationTracker.wrapped_up).
+    - "intents_covered" -- every intent_gap_finder.py intent actually consulted during the chat
+      (_intents_covered_from_turn_log()) -- separate from "topics_covered" above, since an intent
+      can fire for an activity the human brought up unprompted, not just one the saturation loop
+      itself asked about.
+
+    Named "chat<chat>_intents_<stamp>.json" under `log_dir`, timestamped the same way
+    kg_chat_gui.save_session()'s own turns/stats/gaplog files are, so repeated runs never clobber
+    each other. Returns the path written.
+    """
+    save_dir = Path(log_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    effective_recent_date = max(recent_date, current_date - timedelta(days=MAX_SATURATION_GAP_DAYS))
+    log = {
+        "chat": getattr(kg_session, "chat", None),
+        "human": getattr(kg_session, "human", None),
+        "gap": {
+            "current_date": current_date.isoformat(),
+            "last_conversation_date": recent_date.isoformat(),
+            "gap_days": (current_date.date() - recent_date.date()).days,
+            "effective_recent_date": effective_recent_date.isoformat(),
+            "effective_gap_days": (current_date.date() - effective_recent_date.date()).days,
+        },
+        "topics_at_start": [_serialize_topic(t) for t in catch_up_topics],
+        "topics_covered": {
+            "per_topic": _topics_covered_from_tracker(tracker),
+            "asked_log": tracker.asked_log,
+            "saturated": tracker.is_saturated(),
+            "wrapped_up": tracker.wrapped_up,
+        },
+        "intents_covered": _intents_covered_from_turn_log(getattr(kg_session, "turn_log", None) or []),
+    }
+
+    base = re.sub(r"[^A-Za-z0-9_.-]", "_", f"chat{log['chat']}")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    path = save_dir / f"{base}_intents_{stamp}.json"
+    with open(path, "w") as f:
+        json.dump(log, f, indent=2)
+    print(f"Wrote intent log to {path}")
+    return path

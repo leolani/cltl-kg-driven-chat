@@ -795,7 +795,31 @@ kg_session = KgIntentChatSession(
 )
 opening_question = tracker.opening_question(CURRENT_DATE, last_date, lead_topics=2)
 kg_session.open_with(opening_question)
+
+# ... run the chat, then:
+catch_up.save_intent_log(kg_session, tracker, topics, CURRENT_DATE, last_date)
 ```
+
+**`save_intent_log(kg_session, tracker, catch_up_topics, current_date, recent_date, log_dir=
+"intents_log")`** — once the chat is over, writes one
+`notebooks/intents_log/chat<chat>_intents_<stamp>.json` file (same timestamped-filename
+convention as `kg_chat_gui.save_session()`'s turns/stats/gaplog files, now under
+`notebooks/chat_logs/`) summarizing the whole session:
+
+- **`gap`** — the true gap since the last conversation (`gap_days`) alongside the (possibly
+  capped) period this session actually tried to saturate (`effective_recent_date`/
+  `effective_gap_days` — see `MAX_SATURATION_GAP_DAYS` above).
+- **`topics_at_start`** — `find_catch_up_topics()`'s own raw output: every topic identified as
+  worth catching up on *before* the chat began, with its saturation target.
+- **`topics_covered`** — how each of those topics actually fared *live* (reported/asked counts,
+  whether its target was met or it was just capped out), `tracker.asked_log` (one entry per
+  catch-up question actually asked, in order), and whether the tracker ended up saturated/wrapped
+  up.
+- **`intents_covered`** — every `intent_gap_finder.py` intent the per-turn flow actually consulted
+  during the chat (which `intents/*.json` file, which activity type(s), how many times, whether
+  `MAX_INTENT_GAP_ATTEMPTS` ever made it give up) — independent of the catch-up topics above,
+  since an intent fires for *any* matching activity the human mentions, not just ones the
+  saturation loop itself asked about.
 
 **Why the role mapping is needed:** `gaps_from_kg/thought_util.py`'s `get_sem_relation_query()`
 looks for `sem:hasActor`/`sem:hasPlace`/`sem:hasTime`, but no activity ever carries those directly

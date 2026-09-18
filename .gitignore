@@ -6,6 +6,14 @@
 # the repo, not just the default name.
 kg_logs*/
 
+# kg_chat_gui.py's save_session() transcript/stats/gaplog dumps -- default save_dir now resolves
+# to notebooks/chat_logs/, matched at any depth for the same reason as kg_logs*/ above.
+chat_logs/
+
+# catch_up_from_kg.py's save_intent_log() summaries -- default log_dir="intents_log" (typically
+# notebooks/intents_log/), matched at any depth for the same reason as kg_logs*/ above.
+intents_log/
+
 # Generated JSON output (e.g. notebooks/turns.json, notebooks/kg_turns.json from save_turns(),
 # kg_gap_finder.py's --json report, populate_ekg.py's capsules_out_path dump)
 *.json

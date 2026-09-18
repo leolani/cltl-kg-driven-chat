@@ -105,10 +105,10 @@ from tkinter import font as tkfont, scrolledtext, ttk
 DEFAULT_QUIT_WORDS = ("quit", "exit", "goodbye", "bye", "stop")
 
 # Where save_session() writes when run_gui()/ChatWindow aren't given an explicit save_dir --
-# <project root>/chat_logs, resolved from this file's own location so it's the same directory
-# no matter what a notebook's CWD happens to be. Pass save_dir=None to either one to turn saving
-# off entirely.
-DEFAULT_SAVE_DIR = Path(__file__).resolve().parent.parent / "chat_logs"
+# notebooks/chat_logs (this file's own directory), resolved from this file's own location so
+# it's the same directory no matter what a notebook's CWD happens to be. Pass save_dir=None to
+# either one to turn saving off entirely.
+DEFAULT_SAVE_DIR = Path(__file__).resolve().parent / "chat_logs"
 
 # Font size (points) both the transcript/entry/buttons and the graph diagram start at -- each
 # adjustable afterwards via its own slider (see the "Text size"/"Font size" controls in
