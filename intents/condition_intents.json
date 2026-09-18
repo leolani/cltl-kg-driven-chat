@@ -27,8 +27,9 @@
   },
   {
     "activity_types": ["mental_condition"],
-    "activity_qualification": ["duration", "degree"],
+    "activity_qualification": ["duration", "degree", "reason"],
     "qualification_question": {
+      "reason": "Why do you feel {activity}",
       "duration": "How long do you experience {activity}?",
       "degree": "How strong do you experience {activity}?"
     },

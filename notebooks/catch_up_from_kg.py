@@ -8,14 +8,13 @@ src/cltl/gaps_from_kg/get_temporal_containers.py's brain-side temporal queries
 kg_gap_finder.py's rdflib/SPARQL-endpoint queries, which is what the rest of chat_sessions.py's
 per-turn intent-driven gap-finding uses.
 
-This isn't just a one-shot opening line: it drives the WHOLE conversation, in a loop, until this
-human's gap period (the time between find_last_conversation_date() and "now") has as much
-knowledge behind it as their own history says is typical -- not "ask once per topic and move on
-regardless." The loop:
+This isn't just a one-shot opening line: it drives the WHOLE conversation, in a loop, until the
+CATCH-UP PERIOD (see below) has as much knowledge behind it as this human's own history says is
+typical -- not "ask once per topic and move on regardless." The loop:
 
-  1. Ask about a gap-period topic (SaturationTracker.next_question()) -- one of
+  1. Ask about a catch-up-period topic (SaturationTracker.next_question()) -- one of
      DEFAULT_GAP_ACTIVITY_TYPES the human has real history with but not yet ENOUGH reported for
-     this gap period (see "Saturation", below).
+     this period (see "Saturation", below).
   2. Whatever activity/condition the human reports in reply is handled entirely by
      chat_sessions.KgIntentChatSession's own EXISTING per-turn flow, completely unchanged: SRL
      extraction -> push to the KG -> intent_gap_finder.next_intent_gap() keeps asking follow-up
@@ -23,17 +22,25 @@ regardless." The loop:
      intent still has unmet requirements.
   3. Once that activity's own follow-ups are exhausted (say() falls through to the default
      agent_fn reply -- see chat_sessions.KgChatSession.say()'s "default" reply_sources tag), go
-     back to step 1 -- another gap-period topic still short of saturation, or the SAME one again
-     if it still is -- unless every topic has reached saturation, in which case replies fall
-     through to the wrapped agent_fn unchanged and the conversation continues normally.
+     back to step 1 -- another topic still short of saturation, or the SAME one again if it still
+     is -- unless every topic has reached saturation, in which case replies fall through to the
+     wrapped agent_fn unchanged and the conversation continues normally.
 
-Saturation -- "enough knowledge for the gap period", this module's whole goal -- is defined per
-topic as the AVERAGE FREQUENCY of that topic in periods the same length as the gap, found by
-tiling that same window size backwards across the human's own history before the gap even started
-(_windowed_average_rate()): if they've historically reported "exercise" an average of 3 times per
-week-long period, and the gap is a week, 3 exercise activities reported live this session is
-"enough" -- not "however many kg_gap_finder.py or intent_gap_finder.py happen to ask about", and
-not "exactly 1, regardless of how often this person usually reports it."
+**The catch-up period is capped at MAX_SATURATION_GAP_DAYS (14 days)**, even when the real gap
+since find_last_conversation_date() is much longer -- a human who hasn't talked in two months
+still only needs the last two weeks caught up on live, not the whole two months (find_catch_up_topics()
+computes this as `effective_recent_date = max(recent_date, current_date - MAX_SATURATION_GAP_DAYS)`).
+
+**Saturation** -- "enough knowledge for the [capped] catch-up period", this module's whole goal --
+is defined per topic against a fixed WEEKLY baseline, not a baseline tied to however long the
+catch-up period itself happens to be: `_windowed_average_rate()`, always called with a 7-day
+(`CATCH_UP_WINDOW_DAYS`) window, tiles that week-long window backwards across the human's own
+history (everything before the catch-up period) to get their typical weekly rate for that topic,
+which `find_catch_up_topics()` then scales to however many days the (capped) catch-up period
+actually covers. If they've historically reported "exercise" an average of 3 times per week, and
+the catch-up period is 2 weeks, 6 exercise activities reported live this session is "enough" --
+not "however many kg_gap_finder.py or intent_gap_finder.py happen to ask about", and not "exactly
+1, regardless of how often this person usually reports it."
 
 Module contents:
 
@@ -42,9 +49,10 @@ Module contents:
   get_temporal_containers() finds no date/actor/place for any real activity at all.
 - find_last_conversation_date() -- get_temporal_containers.get_last_conversation_date().
 - find_catch_up_topics() -- one entry per DEFAULT_GAP_ACTIVITY_TYPES type with real history,
-  carrying both a concrete example (latest_label/latest_date) and its own saturation target
-  (expected_count, from _windowed_average_rate()) and however much of it the KG's own "gap"
-  bucket already covers before this conversation even starts (initial_reported_count).
+  carrying both a concrete example (latest_label/latest_date), its own weekly baseline
+  (weekly_rate) and saturation target (expected_count) for the capped catch-up period, and
+  however much of that period the KG's own "gap" bucket already covers before this conversation
+  even starts (initial_reported_count).
 - SaturationTracker -- holds those targets plus how many of each topic have actually been
   reported LIVE this session (self.reported, updated via record_new_activity()), decides what's
   still worth asking about (next_question()) and when the whole loop is done (is_saturated()).
@@ -153,12 +161,29 @@ def find_last_conversation_date(human: str, brain, current_date: datetime,
     )
 
 
+# The baseline unit find_catch_up_topics() measures history against: a WEEKLY average, always --
+# see _windowed_average_rate()/find_catch_up_topics()'s own docstrings for why this is now fixed
+# at 7 days regardless of how long the actual gap since the last conversation is.
+CATCH_UP_WINDOW_DAYS = 7
+
+# find_catch_up_topics() never tries to saturate more than this many days back from `current_date`
+# -- if the real gap since recent_date is longer (a human who hasn't talked in months), only the
+# most recent slice of it is what THIS session's saturation loop tries to fill in; everything
+# further back than that still counts toward the historical weekly-average baseline (see
+# find_catch_up_topics()), it just isn't itself a target to catch up on live.
+MAX_SATURATION_GAP_DAYS = 14
+
+
 def _windowed_average_rate(history_dates: List[datetime], window_days: int,
                             series_end: datetime) -> float:
     """The average number of `history_dates` per non-overlapping `window_days`-long window,
-    tiling BACKWARDS from `series_end` (recent_date -- the gap's own start) through the earliest
-    of `history_dates` -- "the average frequency of this topic in periods the same length as the
-    gap, before the gap", per this module's own saturation goal (see the module docstring).
+    tiling BACKWARDS from `series_end` through the earliest of `history_dates` -- "the average
+    frequency of this topic in `window_days`-long periods before `series_end`". find_catch_up_topics()
+    always calls this with `window_days=CATCH_UP_WINDOW_DAYS` (a WEEKLY average, per this module's
+    own saturation goal -- see its docstring), independent of how long the actual catch-up period
+    being saturated is (see MAX_SATURATION_GAP_DAYS) -- decoupling the baseline measurement unit
+    from the target period's own length is what lets a capped-at-14-days catch-up period still be
+    compared against a genuinely long, representative slice of history.
 
     A history spanning less than one full window still counts as exactly one (mostly-empty)
     window rather than being skipped or extrapolated -- an infrequent topic's genuinely low rate
@@ -184,46 +209,86 @@ def _windowed_average_rate(history_dates: List[datetime], window_days: int,
 def find_catch_up_topics(brain, current_date: datetime, recent_date: datetime,
                           activity_types=DEFAULT_GAP_ACTIVITY_TYPES) -> List[Dict]:
     """One entry per `activity_types` local name (default: chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES
-    -- the same set per-turn intent gap-finding already restricts itself to) the human has real
-    HISTORY with in the KG -- i.e. get_temporal_containers.get_temporal_containers()'s own
-    "history" bucket (anything dated before `recent_date`, see its docstring) is non-empty for
-    that type -- sorted most-recently-discussed first (by each type's own latest history
-    activity's own time). A type with NO history at all is left out entirely -- there's nothing to
-    calibrate a saturation target against, let alone catch up on.
+    -- the same set per-turn intent gap-finding already restricts itself to) the human has ever
+    discussed before -- either get_temporal_containers.get_temporal_containers()'s "history"
+    bucket (something with a resolvable date) or its "unknown" one (discussed, but never with a
+    date `_parse_event_time()` could resolve -- see below) is non-empty -- sorted
+    most-recently-discussed first. A type in NEITHER bucket is left out entirely -- there's
+    nothing to calibrate a saturation target against, let alone catch up on.
 
-    Each entry: {"activity_type", "history_count", "latest_label", "latest_date",
+    The period this session actually tries to saturate is capped at MAX_SATURATION_GAP_DAYS (14):
+    `effective_recent_date = max(recent_date, current_date - MAX_SATURATION_GAP_DAYS)` -- the
+    LATER of the true last-conversation date or 14 days ago, so a human who genuinely last talked
+    3 days ago still only needs to cover those 3 days, while one who hasn't talked in 2 months
+    only needs to cover the last 14 -- not the whole 2-month gap. `get_temporal_containers()` is
+    called with THIS date as its own "recent_date", so its own "history"/"gap" bucketing lines up
+    exactly: "history" becomes everything before the catch-up window (still this human's full
+    real history, just minus whatever falls inside the last 14 days), and "gap" becomes exactly
+    the catch-up window itself.
+
+    Each entry: {"activity_type", "history_count", "latest_label", "latest_date", "weekly_rate",
     "expected_count", "initial_reported_count"}:
 
-    - "expected_count" (see _windowed_average_rate()) -- how many of this topic's activities this
-      human would TYPICALLY report over a period as long as the current gap
-      (current_date - recent_date), based on the average across every gap-length window found
-      tiling backwards through their own history before `recent_date`. At least 1 whenever there's
-      any history at all, so even an infrequent topic still gets asked about once -- this is
-      SaturationTracker's own per-topic target.
+    - "weekly_rate" (see _windowed_average_rate(), always called with `window_days=
+      CATCH_UP_WINDOW_DAYS`) -- how many of this topic's activities this human TYPICALLY reports
+      per week, based on the average across every 7-day window found tiling backwards through
+      their own history before the catch-up window -- "the weekly average of activities and
+      conditions reported in the past".
+    - "expected_count" -- "weekly_rate" scaled to however many days the (capped) catch-up window
+      actually covers: `weekly_rate * effective_gap_days / CATCH_UP_WINDOW_DAYS`, rounded, at
+      least 1 whenever there's any dated history at all so even an infrequent topic still gets
+      asked about once. This is SaturationTracker's own per-topic target. A topic with only
+      undated ("unknown") mentions has no weekly_rate to scale at all (`0.0`) -- expected_count
+      falls back to a plain `1` for it instead, the same "ask about it once" default every topic
+      used before saturation targets existed.
     - "initial_reported_count" -- however many of this topic's activities are ALREADY in the KG's
-      own "gap" bucket (dated between `recent_date` and `current_date`) before this conversation
+      own "gap" bucket (i.e. dated within the capped catch-up window) before this conversation
       even starts, e.g. from data pushed through some other channel. Seeded into
       SaturationTracker.reported so a topic that's already partly (or fully) covered needs that
       much LESS asked about live, instead of double-counting it.
     """
     deps = _load_gaps_from_kg()
     gtc = deps["get_temporal_containers"]
-    gap_days = max((current_date.date() - recent_date.date()).days, 1)
+    effective_recent_date = max(recent_date, current_date - timedelta(days=MAX_SATURATION_GAP_DAYS))
+    effective_gap_days = max((current_date.date() - effective_recent_date.date()).days, 1)
     topics = []
     for activity_type in activity_types:
         history, gap, future, unknown = gtc.get_temporal_containers(
-            brain, current_date, recent_date, activity_type="n2mu:" + activity_type
+            brain, current_date, effective_recent_date, activity_type="n2mu:" + activity_type
         )
-        if not history:
+        # get_temporal_containers() itself now falls back to an activity's own CONVERSATION date
+        # (gaf:denotedIn -> sem:hasBeginTimeStamp) whenever none of its own time values resolve to
+        # a real calendar date (a bare "for an hour"/"recently"-style phrase, not an actual date),
+        # so a mention lands in `unknown` only in the rarer case where even that utterance-level
+        # timestamp is missing. Still handled defensively here rather than assumed away: a topic
+        # counts as worth catching up on whenever EITHER bucket is non-empty, so a genuinely
+        # undated mention doesn't silently make this look like a topic with no history at all.
+        if not history and not unknown:
             continue
-        latest = max(history, key=lambda a: a["time"])
-        rate = _windowed_average_rate([a["time"] for a in history], gap_days, recent_date)
+        if history:
+            latest = max(history, key=lambda a: a["time"])
+            latest_label, latest_date = latest["label"], latest["time"]
+            weekly_rate = _windowed_average_rate(
+                [a["time"] for a in history], CATCH_UP_WINDOW_DAYS, effective_recent_date
+            )
+            expected_count = max(1, round(weekly_rate * effective_gap_days / CATCH_UP_WINDOW_DAYS))
+        else:
+            # No dated sample to compute a weekly rate from at all -- falls back to the same
+            # "ask about it at least once" default every topic used before saturation targets
+            # existed, using an undated mention's own label as the concrete memory prompt and
+            # `effective_recent_date` itself as a stand-in "latest_date" (unknown precisely when,
+            # but recent enough to be worth asking about) purely so this topic still sorts
+            # sensibly alongside dated ones below.
+            latest_label, latest_date = unknown[0]["label"], effective_recent_date
+            weekly_rate = 0.0
+            expected_count = 1
         topics.append({
             "activity_type": activity_type,
             "history_count": len(history),
-            "latest_label": latest["label"],
-            "latest_date": latest["time"],
-            "expected_count": max(1, round(rate)),
+            "latest_label": latest_label,
+            "latest_date": latest_date,
+            "weekly_rate": weekly_rate,
+            "expected_count": expected_count,
             "initial_reported_count": len(gap),
         })
     topics.sort(key=lambda t: t["latest_date"], reverse=True)
@@ -231,14 +296,29 @@ def find_catch_up_topics(brain, current_date: datetime, recent_date: datetime,
 
 
 def _catch_up_system_prompt(human: str) -> str:
-    """System prompt for every LLM call this module makes -- same framing as
+    """System prompt for every catch-up QUESTION this module asks -- same framing as
     chat_sessions.default_system_prompt(), restrained to short, non-advice-giving replies, since
-    these are all opening/catch-up QUESTIONS, not coaching."""
+    these are all questions, not coaching. See _wrap_up_system_prompt() for the one moment this
+    module's own reply ISN'T necessarily a question (SaturationTracker.wrap_up_message())."""
     return (
         f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes, at the "
         "start of a new chat conversation about diet, exercise, sleep, stress and daily routines "
         "that affect their blood sugar management. Keep your reply short (1-3 sentences) and "
         "warm. Only ever ask a question -- do not give advice, recommendations, or suggestions."
+    )
+
+
+def _wrap_up_system_prompt(human: str) -> str:
+    """System prompt for SaturationTracker.wrap_up_message() -- the one moment this module's own
+    reply is allowed to be something other than a question: once every catch-up topic is
+    saturated (or capped out), the LLM decides for itself whether to continue the conversation
+    with one more short, natural question, or to wrap up warmly and say goodbye instead."""
+    return (
+        f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes. Keep "
+        "your reply short (1-2 sentences). Either continue the conversation naturally with one "
+        "short question if there's an obvious thread left to follow up on, or wrap the "
+        "conversation up warmly and say goodbye. Do not give advice, recommendations, or "
+        "suggestions."
     )
 
 
@@ -281,7 +361,11 @@ class SaturationTracker:
 
     is_saturated() is True once every target topic is either at/above its own expected_count or
     has hit that per-topic ask cap -- "enough knowledge for the gap period" (this module's own
-    stated goal), not "literally every topic's exact target hit no matter what."
+    stated goal), not "literally every topic's exact target hit no matter what." Once that first
+    happens, wrap_up_message() (see wrap_agent_fn_with_saturation_loop()) hands off to the LLM's
+    own judgement -- continue naturally if there's an obvious thread left, or wrap up and say
+    goodbye -- exactly once (self.wrapped_up), rather than this module silently going quiet or
+    the conversation just stopping with no closing turn at all.
     """
 
     MAX_ASKS_PER_TOPIC = 3
@@ -299,11 +383,17 @@ class SaturationTracker:
         # module's questions -- they're plain "default" reply_sources turns from its own point of
         # view, indistinguishable from a generic LLM reply without this).
         self.asked_log: List[Dict] = []
+        # Set by wrap_up_message() the first time it runs -- see its own docstring and
+        # wrap_agent_fn_with_saturation_loop() for why this must only ever fire once.
+        self.wrapped_up = False
 
-    def record_new_activity(self, activity_type: str) -> None:
+    def record_new_activity(self, subject_uri: str, activity_type: str) -> None:
         """Call whenever a NEW activity/condition of `activity_type` is pushed to the KG during
-        this live session (see chat_sessions.KgChatSession's `on_new_subject` hook) -- a no-op for
-        any type this tracker isn't targeting (not one of find_catch_up_topics()'s own topics)."""
+        this live session -- matches chat_sessions.KgChatSession's own `on_new_subject` hook
+        signature exactly (`callable(subject_uri, activity_type)`), so this can be passed
+        straight through as `on_new_subject=tracker.record_new_activity`; `subject_uri` itself
+        isn't used for anything here (this tracker only ever counts BY type). A no-op for any
+        type this tracker isn't targeting (not one of find_catch_up_topics()'s own topics)."""
         if activity_type in self.reported:
             self.reported[activity_type] += 1
 
@@ -398,6 +488,31 @@ class SaturationTracker:
         reply_fn = agent_fn or _default_reply_fn(self.model)
         return _call_openai(f"asking a catch-up question about {label}", reply_fn, messages)
 
+    def wrap_up_message(self, agent_fn=None) -> str:
+        """The ONE message sent the moment every topic first becomes saturated (or capped out) --
+        see wrap_agent_fn_with_saturation_loop(). Rather than this module going silent and the
+        conversation just ending (the previous behaviour: is_saturated() becoming True meant every
+        subsequent default reply skipped this module entirely, with nothing marking the moment),
+        this hands off to the LLM's own judgement -- names what was actually covered this session,
+        as concrete context -- and lets IT decide whether there's an obvious thread left to
+        continue with, or whether to wrap up and say goodbye instead. Sets self.wrapped_up so this
+        never fires a second time (see wrap_agent_fn_with_saturation_loop(), the only caller)."""
+        self.wrapped_up = True
+        covered = [t.replace("_", " ") for t, target in self.targets.items() if self.reported[t] > 0]
+        covered_phrase = ", ".join(covered) if covered else "nothing new for this period"
+        user_prompt = (
+            f"You've now caught up on everything worth covering for this period (covered: "
+            f"{covered_phrase}). Decide for yourself: if there's an obvious natural thread left to "
+            "follow up on, continue with a short question about it; otherwise wrap the "
+            "conversation up warmly and say goodbye."
+        )
+        messages = [
+            {"role": "system", "content": _wrap_up_system_prompt(self.human)},
+            {"role": "user", "content": user_prompt},
+        ]
+        reply_fn = agent_fn or _default_reply_fn(self.model)
+        return _call_openai("wrapping up the catch-up conversation", reply_fn, messages)
+
 
 def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     """Wrap `agent_fn` (e.g. chat_sessions.openai_agent()) so that every call to it -- which
@@ -405,13 +520,18 @@ def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     to ask about for whatever the human just said, see its own docstring's "default"
     reply_sources tag -- asks about the next still-unsaturated gap-period topic
     (tracker.next_question()) instead of the plain default reply, for as long as
-    `tracker.is_saturated()` is False; once every topic is saturated (or capped out), every call
-    goes straight through to `agent_fn` unchanged, exactly as if this wrapper wasn't there.
+    `tracker.is_saturated()` is False. The FIRST time every topic is saturated (or capped out),
+    `tracker.wrap_up_message()` runs once instead of silently falling through -- see its own
+    docstring for why. After that (`tracker.wrapped_up` is True), every call goes straight through
+    to `agent_fn` unchanged, exactly as if this wrapper wasn't there -- so the conversation
+    continues (or ends, if the human says goodbye back) as an ordinary chat from that point on.
     """
     def _wrapped(messages):
         if not tracker.is_saturated():
             question = tracker.next_question()
             if question is not None:
                 return question
+        elif not tracker.wrapped_up:
+            return tracker.wrap_up_message()
         return agent_fn(messages)
     return _wrapped

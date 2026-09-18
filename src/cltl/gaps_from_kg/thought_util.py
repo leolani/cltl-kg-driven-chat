@@ -575,6 +575,25 @@ def get_role_relation_query(event_id):
                         }"
         return query
 
+
+def get_utterance_time_query(event_id):
+        """The timestamp of the UTTERANCE `event_id` was denoted in (`gaf:denotedIn` ->
+        `sem:hasBeginTimeStamp`, the same chain get_role_relation_query() already uses) -- the
+        date the conversation itself happened on, as opposed to whatever (if any) time value the
+        activity's own `n2mu:time/*` role carries. Used by get_temporal_containers.
+        get_temporal_containers() as a FALLBACK once an activity's own time role turns out to be
+        an unresolvable, vague phrase ("for an hour", "recently") rather than a real calendar
+        date -- see that function's own comment on why "said about it during the conversation"
+        is a reasonable date to fall back on when the activity's own phrasing gives no better
+        one."""
+        query = "PREFIX gaf: <http://groundedannotationframework.org/gaf#>\
+                PREFIX sem: <http://semanticweb.cs.vu.nl/2009/11/sem/>\
+                select ?time_id where { \
+                <" + event_id + "> gaf:denotedIn ?u . \
+                ?u sem:hasBeginTimeStamp ?time_id . \
+                }"
+        return query
+
 def get_perspective_query(event_id):
     query = "PREFIX n2mu: <http://cltl.nl/leolani/n2mu/>\
             PREFIX grasp: <http://groundedannotationframework.org/grasp#>\

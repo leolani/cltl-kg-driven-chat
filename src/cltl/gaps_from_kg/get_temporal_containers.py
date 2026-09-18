@@ -23,9 +23,9 @@ def _parse_event_time(value: str):
     notebooks/chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES's own comment on that) is an entirely
     normal, expected value here, not a malformed date to raise over. The caller
     (get_temporal_containers()/get_temporal_container_for_agent()) simply has no date to go on
-    from THIS particular time value when this returns None -- the activity still lands in the
-    "unknown" bucket if none of its time triples resolve to a real date, exactly as if it had no
-    time value asserted at all.
+    from THIS particular time value when this returns None -- get_temporal_containers() then
+    falls back to the CONVERSATION's own date (see its own comment, right after the sem-relation
+    loop) before giving up and landing the activity in the "unknown" bucket.
     """
     local_name = value.rsplit("/", 1)[-1]
     try:
@@ -113,6 +113,21 @@ def get_temporal_containers (brain:LongTermMemory, current_date:datetime, recent
                 parsed_time = _parse_event_time(sem['time_id']['value'])
                 if parsed_time is not None:
                     event_date = parsed_time
+
+        #### Fall back to the CONVERSATION's own date (when this activity was actually said,
+        #### via gaf:denotedIn -> sem:hasBeginTimeStamp) whenever none of the activity's own time
+        #### values resolved to a real date above -- most of the time this means the human used a
+        #### vague or relative phrase ("for an hour", "recently", "yesterday") that
+        #### _parse_event_time() correctly can't turn into a calendar date on its own. Without
+        #### this, an activity like that would land in the "unknown" bucket forever, even though
+        #### its own utterance date is perfectly well known -- "said about it during the
+        #### conversation" is the best date to attribute it to short of actually understanding the
+        #### phrase itself.
+        if not event_date:
+            time_query = util.get_utterance_time_query(activity_id)
+            time_response = brain._submit_query(time_query)
+            if time_response:
+                event_date = _parse_event_time(time_response[0]['time_id']['value'])
 
         #### Get perspectives
         emotion = GoEmotion.NEUTRAL

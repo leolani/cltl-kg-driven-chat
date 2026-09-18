@@ -31,11 +31,15 @@ terminal `input()` loop.
   -- the activity as one centered node, every (predicate, object) triple pushed for it as a
   labeled edge fanning out to its own node, except `rdfs:label` triples (the label value is
   already what the center node's own text shows, so repeating it as a separate
-  "label -> <that same text>" node/edge would just be clutter) and `gaf:denotedIn`/`denotedBy`
+  "label -> <that same text>" node/edge would just be clutter), `gaf:denotedIn`/`denotedBy`
   triples (`GAF_PROVENANCE_PREDICATES`: pure extraction provenance -- which utterance span a
-  fact came from -- not semantic content, and typically several per subject) -- neither is ever
-  drawn as its own node -- rendered directly on a `tk.Canvas`, entirely in-window, no browser
-  involved (see the graph-panel section below and `_render_graph()`). Every
+  fact came from -- not semantic content, and typically several per subject), and
+  `sem:eventProperty`/`eps:contextProperty` triples (`GENERIC_ANCESTOR_PREDICATES`: generic
+  ancestor properties every real role predicate is inferred under on a repository with
+  RDFS/OWL reasoning enabled, which would otherwise duplicate every single edge already drawn
+  under its own real predicate) -- none of these three is ever drawn as its own node -- rendered
+  directly on a `tk.Canvas`, entirely in-window, no browser involved (see the graph-panel section
+  below and `_render_graph()`). Every
   node is filled by its RDF namespace (`_namespace_of()`/`_node_fill_color()`): red for `n2mu`,
   blue for `gaf`, green for `grasp` (this project's own ontology namespaces -- see
   `NAMESPACE_COLORS`), a plain literal (not a URI at all) gray, and any other namespace one of
@@ -131,6 +135,22 @@ LABEL_PREDICATE = "http://www.w3.org/2000/01/rdf-schema#label"
 # reason). Excluded from the graph diagram too, alongside LABEL_PREDICATE -- see _render_graph().
 GAF_NAMESPACE = "http://groundedannotationframework.org/gaf#"
 GAF_PROVENANCE_PREDICATES = {GAF_NAMESPACE + "denotedIn", GAF_NAMESPACE + "denotedBy"}
+# sem:eventProperty and eps:contextProperty are the SEM/episodic-awareness ontologies' own generic
+# ANCESTOR properties: every real role predicate this project pushes (n2mu:agent, n2mu:location,
+# ...) is rdfs:subPropertyOf sem:hasActor/hasPlace/hasTime etc. (see n2mu_sem_roles.py), which are
+# themselves rdfs:subPropertyOf sem:eventProperty, and eps:contextProperty is declared
+# owl:equivalentProperty to that same sem:eventProperty (see cltl.brain's own
+# ontologies/integration.ttl). On a GraphDB repository with RDFS/OWL inference enabled, EVERY one
+# of those real triples is therefore also materialized as an sem:eventProperty and an
+# eps:contextProperty triple to the SAME object -- fetch_triples() has no way to tell an inferred
+# triple from an asserted one, so without this exclusion the SAME (subject, object) pair draws as
+# up to three near-identical edges/nodes (one real predicate, plus these two generic ones) instead
+# of one. Excluded from the graph diagram alongside LABEL_PREDICATE/GAF_PROVENANCE_PREDICATES --
+# see _render_graph().
+GENERIC_ANCESTOR_PREDICATES = {
+    "http://semanticweb.cs.vu.nl/2009/11/sem/eventProperty",
+    "http://cltl.nl/episodicawareness/contextProperty",
+}
 SPARQL_TIMEOUT = 8  # seconds -- fetch_triples() runs on a background thread, but shouldn't hang it forever.
 
 # Node-link diagram colors (see ChatWindow._render_graph()) -- picked to read clearly on the
@@ -895,9 +915,16 @@ class ChatWindow:
         # pure extraction provenance (which utterance span a fact came from), not semantic
         # content, and typically several per subject -- one per turn that ever mentioned it --
         # so drawing them would clutter the diagram with utterance-span nodes nobody asked about.
+        #
+        # sem:eventProperty/eps:contextProperty (GENERIC_ANCESTOR_PREDICATES) are excluded for yet
+        # another reason: on a repository with inference enabled, these are the same object every
+        # real role predicate already draws an edge for, just materialized again under a generic
+        # ancestor property -- drawing them too would duplicate every single edge in the diagram.
         drawable_triples = [
             (p, o) for p, o in triples
-            if p != LABEL_PREDICATE and p not in GAF_PROVENANCE_PREDICATES
+            if p != LABEL_PREDICATE
+            and p not in GAF_PROVENANCE_PREDICATES
+            and p not in GENERIC_ANCESTOR_PREDICATES
         ]
 
         # Node/text sizes all scale off the one "Font size" slider value. Node/center radii scale

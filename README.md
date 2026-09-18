@@ -603,18 +603,27 @@ interactive view (drag nodes, expand further, ...) in a browser tab whenever tha
 - **The diagram itself** — the activity as a filled circle at the center, one line per triple to
   a smaller circle for its object, the predicate's local name on the line, the object's own
   label (or value, for a literal) inside its circle; long labels are truncated (`_truncate()`) to
-  fit. Two kinds of triple are excluded from that (`drawable_triples` in `_render_graph()`):
+  fit. Three kinds of triple are excluded from that (`drawable_triples` in `_render_graph()`):
   `rdfs:label` — the label value is already what the center node's own text shows
   (`_apply_graph_update()`'s `LABEL_PREDICATE` lookup), so drawing "label → *that same text*"
   again as its own node/edge would just repeat it, and a subject can legitimately carry several
   (one per turn that introduced a new phrase for it), which would otherwise show up as several
-  near-duplicate nodes — and `gaf:denotedIn`/`denotedBy` (`GAF_PROVENANCE_PREDICATES`) — pure
+  near-duplicate nodes — `gaf:denotedIn`/`denotedBy` (`GAF_PROVENANCE_PREDICATES`) — pure
   extraction provenance (which utterance span a fact came from), not semantic content, and
   typically several per subject too (one per turn that ever mentioned it), so drawing them would
-  clutter the diagram with utterance-span nodes nobody asked about. Redrawing on a pane resize
-  (`<Configure>`) reuses the already-fetched data
+  clutter the diagram with utterance-span nodes nobody asked about — and `sem:eventProperty`/
+  `eps:contextProperty` (`GENERIC_ANCESTOR_PREDICATES`) — the SEM/episodic-awareness ontologies'
+  own generic ANCESTOR properties every real role predicate is `rdfs:subPropertyOf` (transitively,
+  via `n2mu_sem_roles.py`'s own mapping — see [Catch-up opening
+  flow](#catch-up-opening-flow-catch_up_from_kgpy)): on a GraphDB repository with RDFS/OWL
+  inference enabled, every real triple (e.g. `n2mu:agent`) is therefore ALSO materialized under
+  these two generic predicates to the exact same object, and `fetch_triples()` has no way to tell
+  an inferred triple from an asserted one — without this exclusion, every single edge in the
+  diagram would draw up to three times over (once for its own real predicate, once each for these
+  two generic ones). Redrawing on a pane resize (`<Configure>`) reuses the already-fetched data
   (`self._graph_center_label`/`self._graph_center_uri`/`self._graph_triples` — the *raw*,
-  unfiltered set; both kinds are filtered again on every redraw, not dropped from the cache) —
+  unfiltered set; all three exclusions are re-applied on every redraw, not dropped from the
+  cache) —
   no extra network round-trip just to re-lay-out the same graph at a new size.
 - **Node colors, by RDF namespace** (`_namespace_of()`/`_node_fill_color()`) — red for `n2mu`,
   blue for `gaf`, green for `grasp` (`NAMESPACE_COLORS`, this project's own ontology's three
@@ -687,21 +696,44 @@ SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by `kg_catchup_
    `get_temporal_containers.get_last_conversation_date()`: the most recent date this human is on
    record as having spoken at all, or `fallback_date` if the graph has none (e.g. a brand new
    human).
-2. **`find_catch_up_topics(brain, current_date, recent_date)`** — for every activity/condition
-   type `chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES` already covers with real **history** (something
-   dated before the last conversation), runs `get_temporal_containers.get_temporal_containers()`
-   and computes, per topic:
-   - **`expected_count`** — this topic's own *saturation target* for a gap this long: the average
-     number of that topic's activities found per gap-length window, tiling that window size
-     backwards across the human's *entire* history before the gap (`_windowed_average_rate()`) —
-     "the average frequency of this topic in similar periods before the gap," at least 1 whenever
-     there's any history at all.
+2. **`find_catch_up_topics(brain, current_date, recent_date)`** — first caps the period this
+   session actually tries to catch up on at `MAX_SATURATION_GAP_DAYS` (**14 days**):
+   `effective_recent_date = max(recent_date, current_date - 14 days)` — the *later* of the true
+   last-conversation date or two weeks ago, so a human who last talked 3 days ago only needs those
+   3 days covered, while one who hasn't talked in 2 months only needs the last 14. Then, for every
+   activity/condition type `chat_sessions.DEFAULT_GAP_ACTIVITY_TYPES` the human has ever discussed
+   before (see below), runs `get_temporal_containers.get_temporal_containers()` (with
+   `effective_recent_date` as its own "recent_date", so its "history"/"gap" split lines up with
+   the cap) and computes, per topic:
+   - **`weekly_rate`** — this topic's typical **weekly** frequency: the average number of
+     activities found per 7-day window, tiling that fixed week-long window backwards across the
+     human's *entire* dated history before the catch-up period (`_windowed_average_rate()`, always
+     called with a 7-day window regardless of how long the catch-up period itself is) — "the
+     weekly average of activities and conditions reported in the past." `0.0` for a topic with no
+     *dated* mentions at all (see the "unknown"-bucket fallback below).
+   - **`expected_count`** — `weekly_rate` scaled to however many days the (capped) catch-up period
+     covers (`weekly_rate * effective_gap_days / 7`, rounded, at least 1 whenever there's any
+     dated history at all). A topic whose only mentions are undated (`weekly_rate` `0.0`) falls
+     back to a plain `1` instead — this topic's own *saturation target* either way.
    - **`initial_reported_count`** — however many of this topic's activities are *already* in the
-     KG's own "gap" bucket (dated between the last conversation and now) before this conversation
-     even starts, e.g. from another channel — credited toward the target instead of double-asked.
+     KG's own "gap" bucket (dated within the capped catch-up period) before this conversation even
+     starts, e.g. from another channel — credited toward the target instead of double-asked.
+
+   **A topic counts as "discussed before" whenever EITHER `get_temporal_containers()`'s "history"
+   *or* its "unknown" bucket is non-empty** — not "history" alone. In practice almost every
+   activity's own `n2mu:time/*` role is a bare phrase ("for an hour", "recently") the SRL
+   extractor never resolves to a real date, and `get_temporal_containers()` itself now falls back
+   to the *conversation's own* date (`gaf:denotedIn` → `sem:hasBeginTimeStamp`, the same chain
+   `get_role_relation_query()` already used) whenever an activity's own time value doesn't resolve
+   — so a mention only lands in "unknown" in the rarer case where even that utterance-level
+   timestamp is missing. Requiring "history" alone used to silently exclude almost every real
+   topic except whichever one happened to have a cleanly-parseable date somewhere; a topic found
+   only via "unknown" still gets a target, just the plain `expected_count = 1` fallback above,
+   since there's no dated sample to compute a rate from.
 3. **`SaturationTracker`** — holds every topic's target and how many have actually been reported
    *live* this session (seeded from `initial_reported_count`, updated via
-   `record_new_activity(activity_type)`):
+   `record_new_activity(subject_uri, activity_type)` — matching `on_new_subject`'s own signature
+   exactly, see below, so it can be passed straight through as-is):
    - **`opening_question(...)`** — one LLM call phrasing the actual first turn: how long it's
      been, inviting the human to share what's happened, naming the `lead_topics` (default 2)
      topics with the biggest shortfall as concrete memory prompts — and marks those as asked once,
@@ -717,11 +749,18 @@ SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by `kg_catchup_
      target was ever reached: a human with nothing more to say about a topic shouldn't be asked
      about it forever. Bounds the whole loop too (at most `len(topics) * MAX_ASKS_PER_TOPIC`
      catch-up questions, worst case).
+   - **`wrap_up_message(...)`** — the ONE message sent the FIRST time every topic becomes
+     saturated (or capped out): rather than this module going silent and the conversation just
+     stopping with no closing turn, it tells the LLM what was actually covered this session and
+     lets it decide for itself — continue with a short question if there's an obvious thread left,
+     or wrap up warmly and say goodbye. Sets `self.wrapped_up` so it never fires a second time.
 4. **`wrap_agent_fn_with_saturation_loop(agent_fn, tracker)`** — wraps a plain `agent_fn` so that
    every call to it (which `KgChatSession.say()` only ever makes once it's found no per-turn
    intent gap left to ask about — the `"default"` `reply_sources` case) asks about the next
-   under-covered topic instead, for as long as `tracker.is_saturated()` is False; once every topic
-   is saturated (or capped out), every call goes straight through to `agent_fn` unchanged.
+   under-covered topic instead, for as long as `tracker.is_saturated()` is False; the first time
+   every topic is saturated (or capped out), `tracker.wrap_up_message()` runs once instead of
+   silently falling through; after that (`tracker.wrapped_up`), every call goes straight through
+   to `agent_fn` unchanged.
 
 The loop this produces: **ask about a gap-period topic** (`next_question()`) → whatever the human
 reports is handled entirely by `KgIntentChatSession`'s own *existing* per-turn flow, completely
@@ -729,7 +768,9 @@ unchanged (SRL extraction → push to the KG → `intent_gap_finder.next_intent_
 into that SAME activity's own what/how much/when/where for as long as its matching intent has
 unmet requirements) → once that's exhausted and `say()` would fall back to the default reply, **go
 back to asking about a topic** (the same one again if still short, or a different one) → **unless
-`tracker.is_saturated()`**, at which point the conversation just continues normally. Getting
+`tracker.is_saturated()`**, in which case the LLM gets exactly one chance to wrap things up
+(`wrap_up_message()`) before the conversation continues (or ends) as an ordinary chat from there.
+Getting
 `SaturationTracker.record_new_activity()` called for every genuinely new activity as it's pushed
 — the *only* piece this needs from `chat_sessions.py` itself, since the rest is pure `agent_fn`
 wrapping — is `KgChatSession`'s own `on_new_subject` constructor parameter: an optional
@@ -858,9 +899,12 @@ reasoning enabled.
   older repository.
 - **`SaturationTracker`'s targets assume the future looks like the past.** `expected_count`
   (see [Catch-up opening flow](#catch-up-opening-flow-catch_up_from_kgpy)) is a plain historical
-  average with no seasonality/trend awareness — a topic the human used to report often but has
-  since stopped still gets a target based on their OLD rate, and `MAX_ASKS_PER_TOPIC` (not the
+  weekly average with no seasonality/trend awareness — a topic the human used to report often but
+  has since stopped still gets a target based on their OLD rate, and `MAX_ASKS_PER_TOPIC` (not the
   target) is what actually stops it from being asked about forever in that case.
+  `CATCH_UP_WINDOW_DAYS` (7) and `MAX_SATURATION_GAP_DAYS` (14) are both module constants, not
+  (yet) per-session parameters — a coach who wants a longer catch-up window, or a baseline measured
+  over something other than a week, needs to change `catch_up_from_kg.py` directly.
   `initial_reported_count` is only as complete as `get_temporal_containers()`'s own date-based
   "gap" bucket — an activity with only a vague, unresolved time phrase (`"for an hour"`,
   `"recently"`) never lands there (see `_parse_event_time()`), so pre-existing gap-period data
