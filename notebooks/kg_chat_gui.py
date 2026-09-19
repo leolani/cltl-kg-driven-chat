@@ -151,6 +151,34 @@ GENERIC_ANCESTOR_PREDICATES = {
     "http://semanticweb.cs.vu.nl/2009/11/sem/eventProperty",
     "http://cltl.nl/episodicawareness/contextProperty",
 }
+
+# Groups of predicates that all express the SAME underlying role for a triple's OBJECT: the real
+# n2mu: role predicate(s) this project's own extractor asserts, plus the one SEM-ontology
+# superproperty n2mu_sem_roles.py's own ROLE_SUBPROPERTY_MAP declares each of them
+# rdfs:subPropertyOf (duplicated here rather than imported -- see this module's own "plain
+# urllib, no rdflib" design note above GRAPHDB_REPOSITORY_URL_PATTERN). Unlike
+# GENERIC_ANCESTOR_PREDICATES's sem:eventProperty/eps:contextProperty (which carry no real
+# information of their own and are always dropped outright), sem:hasActor/hasPlace/hasTime DO
+# mean something -- so instead of excluding them, _merge_equivalent_edges() collapses each group
+# down to just ONE edge per distinct object it shares with one of the group's own n2mu:
+# predicates. Concretely: on a repository with RDFS/OWL inference enabled, a single
+# `n2mu:agent -> "Jan"` triple is ALSO materialized as `sem:hasActor -> "Jan"` (agent_patient/
+# participant/experiencer all the same way), and without merging, the diagram would draw two (or
+# more) near-identical edges to "Jan" for what both really are the same one fact. Order within
+# each tuple matters: the FIRST member actually present for a given object is what the merged
+# edge is labeled with, so a real, specific n2mu: predicate is always shown in preference to its
+# own generic sem: superproperty copy.
+N2MU_NAMESPACE = "http://cltl.nl/leolani/n2mu/"
+SEM_NAMESPACE = "http://semanticweb.cs.vu.nl/2009/11/sem/"
+EDGE_EQUIVALENCE_GROUPS = (
+    (N2MU_NAMESPACE + "agent", N2MU_NAMESPACE + "agent_patient", N2MU_NAMESPACE + "participant",
+     N2MU_NAMESPACE + "experiencer", SEM_NAMESPACE + "hasActor"),
+    (N2MU_NAMESPACE + "location", SEM_NAMESPACE + "hasPlace"),
+    (N2MU_NAMESPACE + "time/dateTime", N2MU_NAMESPACE + "time/rangeTime",
+     N2MU_NAMESPACE + "time/recurringTime", N2MU_NAMESPACE + "time/vagueTime",
+     SEM_NAMESPACE + "hasTime"),
+)
+
 SPARQL_TIMEOUT = 8  # seconds -- fetch_triples() runs on a background thread, but shouldn't hang it forever.
 
 # Node-link diagram colors (see ChatWindow._render_graph()) -- picked to read clearly on the
@@ -269,6 +297,33 @@ def _truncate(text: str, max_chars: int) -> str:
     or the plain triples this diagram is built from (fetch_triples())."""
     text = text if text is not None else ""
     return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
+
+
+def _merge_equivalent_edges(triples):
+    """Collapse every EDGE_EQUIVALENCE_GROUPS group down to one (predicate, object) edge per
+    distinct object it shares with one of that group's own predicates -- see that constant's own
+    docstring for why (an inferred sem:hasActor/hasPlace/hasTime triple duplicating a real
+    n2mu:agent/location/time/* one to the same object). A triple whose predicate isn't in any
+    group passes through unchanged. Preserves the ORIGINAL ordering: a merged edge is placed
+    wherever its group+object pair was first seen among `triples`, so the diagram's edge order
+    doesn't visibly reshuffle just because this ran.
+    """
+    group_by_predicate = {p: group for group in EDGE_EQUIVALENCE_GROUPS for p in group}
+    clusters = {}  # (group, object) -> {"predicates": set(), "first_index": int}
+    passthrough = []
+    for index, (predicate, obj) in enumerate(triples):
+        group = group_by_predicate.get(predicate)
+        if group is None:
+            passthrough.append((index, predicate, obj))
+            continue
+        cluster = clusters.setdefault((group, obj), {"predicates": set(), "first_index": index})
+        cluster["predicates"].add(predicate)
+    merged = [
+        (cluster["first_index"], next(p for p in group if p in cluster["predicates"]), obj)
+        for (group, obj), cluster in clusters.items()
+    ]
+    ordered = sorted(passthrough + merged, key=lambda item: item[0])
+    return [(predicate, obj) for _, predicate, obj in ordered]
 
 
 # --------------------------------------------------------------------------- #
@@ -920,12 +975,20 @@ class ChatWindow:
         # another reason: on a repository with inference enabled, these are the same object every
         # real role predicate already draws an edge for, just materialized again under a generic
         # ancestor property -- drawing them too would duplicate every single edge in the diagram.
-        drawable_triples = [
+        #
+        # sem:hasActor/hasPlace/hasTime are a related but different case: unlike the two generic
+        # ancestors above they DO carry real meaning, so rather than dropping them outright,
+        # _merge_equivalent_edges() (see EDGE_EQUIVALENCE_GROUPS) collapses each one down to a
+        # single edge with whichever real n2mu: role predicate (agent/agent_patient/participant/
+        # experiencer, location, or one of the four time/* variants) shares the SAME object --
+        # inference otherwise materializes both to that object, which would draw as two (or more)
+        # near-identical edges for what both really are the same one fact.
+        drawable_triples = _merge_equivalent_edges([
             (p, o) for p, o in triples
             if p != LABEL_PREDICATE
             and p not in GAF_PROVENANCE_PREDICATES
             and p not in GENERIC_ANCESTOR_PREDICATES
-        ]
+        ])
 
         # Node/text sizes all scale off the one "Font size" slider value. Node/center radii scale
         # roughly PROPORTIONALLY with it (not by a small fixed add-on) -- a fixed add-on barely

@@ -180,6 +180,19 @@ CATCH_UP_WINDOW_DAYS = 7
 # find_catch_up_topics()), it just isn't itself a target to catch up on live.
 MAX_SATURATION_GAP_DAYS = 14
 
+# How many of the REAL running conversation's own messages (self._messages, as
+# chat_sessions.ChatSession keeps it -- see wrap_agent_fn_with_saturation_loop(), which is what
+# actually has access to it and passes it through) SaturationTracker.next_question()/
+# wrap_up_message() include as context ahead of their own instruction. Without this, both used
+# to build a totally ISOLATED [system, user] prompt from scratch every time -- meaning the LLM
+# deciding whether to keep asking questions or wrap up and say goodbye had NO WAY to see anything
+# the human actually just said. Concretely: a real session had the human type "What's next?"
+# (an explicit request to keep going) immediately before wrap_up_message() ran, and the reply
+# said goodbye anyway -- not because the LLM ignored the human, but because it was never shown
+# that message at all. Any "system"-role entries in the tail are dropped (see _recent_context())
+# since this module supplies its own.
+RECENT_CONTEXT_MESSAGES = 6
+
 
 def _windowed_average_rate(history_dates: List[datetime], window_days: int,
                             series_end: datetime) -> float:
@@ -319,12 +332,21 @@ def _wrap_up_system_prompt(human: str) -> str:
     """System prompt for SaturationTracker.wrap_up_message() -- the one moment this module's own
     reply is allowed to be something other than a question: once every catch-up topic is
     saturated (or capped out), the LLM decides for itself whether to continue the conversation
-    with one more short, natural question, or to wrap up warmly and say goodbye instead."""
+    with one more short, natural question, or to wrap up warmly and say goodbye instead.
+
+    Explicitly told to weigh the human's OWN last message heavily, not just the "everything's
+    covered" framing in the user prompt (see wrap_up_message()) -- a real session once had the
+    human type "What's next?" (an unambiguous request to keep going) and got a goodbye anyway,
+    because a plain "decide for yourself" instruction let the LLM lean entirely on "we've covered
+    everything" and never actually weigh what the human had just said against it."""
     return (
         f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes. Keep "
-        "your reply short (1-2 sentences). Either continue the conversation naturally with one "
-        "short question if there's an obvious thread left to follow up on, or wrap the "
-        "conversation up warmly and say goodbye. Do not give advice, recommendations, or "
+        "your reply short (1-2 sentences). The catch-up topics for this period are covered, but "
+        "look at the human's OWN last message before deciding what to do: if it asks a question, "
+        "asks what's next, or otherwise shows they want to keep talking, treat that as more "
+        "important than \"everything's covered\" and continue the conversation naturally instead "
+        "of ending it. Only wrap up warmly and say goodbye if the human's own tone suggests "
+        "they're done, or they say goodbye themselves. Do not give advice, recommendations, or "
         "suggestions."
     )
 
@@ -344,6 +366,18 @@ def _default_reply_fn(model: str):
     return lambda messages: _openai_client().chat.completions.create(
         model=model, messages=messages
     ).choices[0].message.content
+
+
+def _recent_context(messages: Optional[List[Dict]]) -> List[Dict]:
+    """The last RECENT_CONTEXT_MESSAGES entries of the REAL running conversation (see that
+    constant's own docstring for why this exists at all), with any "system"-role entries dropped
+    -- this module supplies its own system prompt ahead of these, and a chat's very first message
+    is always ChatSession's own system prompt, which would otherwise land here too on a short
+    conversation. Returns [] for `messages=None` (the default for every direct/test call that
+    doesn't have a real conversation to draw from -- see next_question()/wrap_up_message())."""
+    if not messages:
+        return []
+    return [m for m in messages[-RECENT_CONTEXT_MESSAGES:] if m.get("role") != "system"]
 
 
 class SaturationTracker:
@@ -455,12 +489,16 @@ class SaturationTracker:
         reply_fn = agent_fn or _default_reply_fn(self.model)
         return _call_openai("generating the opening catch-up question", reply_fn, messages)
 
-    def next_question(self, agent_fn=None) -> Optional[str]:
+    def next_question(self, agent_fn=None, messages: Optional[List[Dict]] = None) -> Optional[str]:
         """Ask about whichever still-unsaturated topic (see _remaining()) has the biggest
         shortfall (expected_count - reported so far), tie-broken by most-recently-discussed --
         or None once every topic is saturated or capped out. Phrases a FOLLOW-UP ("anything
         else...") when this topic's already been asked about before this session, instead of
-        repeating the exact same question."""
+        repeating the exact same question.
+
+        `messages` -- the REAL running conversation (see RECENT_CONTEXT_MESSAGES) -- is included
+        as context ahead of the instruction when given, so the question reacts to what the human
+        actually just said instead of being generated in isolation from it."""
         remaining = self._remaining()
         if not remaining:
             return None
@@ -488,14 +526,15 @@ class SaturationTracker:
                 f"\"{target['latest_label']}\"). Ask them a short, natural question inviting them "
                 f"to share what's happened with their {label} during this period."
             )
-        messages = [
-            {"role": "system", "content": _catch_up_system_prompt(self.human)},
-            {"role": "user", "content": user_prompt},
-        ]
+        prompt = (
+            [{"role": "system", "content": _catch_up_system_prompt(self.human)}]
+            + _recent_context(messages)
+            + [{"role": "user", "content": user_prompt}]
+        )
         reply_fn = agent_fn or _default_reply_fn(self.model)
-        return _call_openai(f"asking a catch-up question about {label}", reply_fn, messages)
+        return _call_openai(f"asking a catch-up question about {label}", reply_fn, prompt)
 
-    def wrap_up_message(self, agent_fn=None) -> str:
+    def wrap_up_message(self, agent_fn=None, messages: Optional[List[Dict]] = None) -> str:
         """The ONE message sent the moment every topic first becomes saturated (or capped out) --
         see wrap_agent_fn_with_saturation_loop(). Rather than this module going silent and the
         conversation just ending (the previous behaviour: is_saturated() becoming True meant every
@@ -503,7 +542,14 @@ class SaturationTracker:
         this hands off to the LLM's own judgement -- names what was actually covered this session,
         as concrete context -- and lets IT decide whether there's an obvious thread left to
         continue with, or whether to wrap up and say goodbye instead. Sets self.wrapped_up so this
-        never fires a second time (see wrap_agent_fn_with_saturation_loop(), the only caller)."""
+        never fires a second time (see wrap_agent_fn_with_saturation_loop(), the only caller).
+
+        `messages` (see RECENT_CONTEXT_MESSAGES) matters MOST here of anywhere in this module: a
+        real session once had the human type "What's next?" -- an explicit request to keep going
+        -- immediately before this ran, and it said goodbye anyway, because without the real
+        conversation as context it had no way to know that message even existed. Passing it
+        through is what lets the LLM actually notice a signal like that instead of deciding purely
+        from the "covered: ..." summary below."""
         self.wrapped_up = True
         covered = [t.replace("_", " ") for t, target in self.targets.items() if self.reported[t] > 0]
         covered_phrase = ", ".join(covered) if covered else "nothing new for this period"
@@ -513,12 +559,13 @@ class SaturationTracker:
             "follow up on, continue with a short question about it; otherwise wrap the "
             "conversation up warmly and say goodbye."
         )
-        messages = [
-            {"role": "system", "content": _wrap_up_system_prompt(self.human)},
-            {"role": "user", "content": user_prompt},
-        ]
+        prompt = (
+            [{"role": "system", "content": _wrap_up_system_prompt(self.human)}]
+            + _recent_context(messages)
+            + [{"role": "user", "content": user_prompt}]
+        )
         reply_fn = agent_fn or _default_reply_fn(self.model)
-        return _call_openai("wrapping up the catch-up conversation", reply_fn, messages)
+        return _call_openai("wrapping up the catch-up conversation", reply_fn, prompt)
 
 
 def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
@@ -532,14 +579,18 @@ def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     docstring for why. After that (`tracker.wrapped_up` is True), every call goes straight through
     to `agent_fn` unchanged, exactly as if this wrapper wasn't there -- so the conversation
     continues (or ends, if the human says goodbye back) as an ordinary chat from that point on.
+
+    `messages` -- the REAL running conversation, which `say()` always passes to `agent_fn` -- is
+    forwarded to both `next_question()` and `wrap_up_message()` (see RECENT_CONTEXT_MESSAGES) so
+    neither is generated blind to whatever the human just actually said.
     """
     def _wrapped(messages):
         if not tracker.is_saturated():
-            question = tracker.next_question()
+            question = tracker.next_question(messages=messages)
             if question is not None:
                 return question
         elif not tracker.wrapped_up:
-            return tracker.wrap_up_message()
+            return tracker.wrap_up_message(messages=messages)
         return agent_fn(messages)
     return _wrapped
 
