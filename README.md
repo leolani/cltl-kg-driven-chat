@@ -603,7 +603,8 @@ interactive view (drag nodes, expand further, ...) in a browser tab whenever tha
 - **The diagram itself** — the activity as a filled circle at the center, one line per triple to
   a smaller circle for its object, the predicate's local name on the line, the object's own
   label (or value, for a literal) inside its circle; long labels are truncated (`_truncate()`) to
-  fit. Three kinds of triple are excluded from that (`drawable_triples` in `_render_graph()`):
+  fit. A few kinds of triple are excluded from, or merged within, that
+  (`drawable_triples` in `_render_graph()`):
   `rdfs:label` — the label value is already what the center node's own text shows
   (`_apply_graph_update()`'s `LABEL_PREDICATE` lookup), so drawing "label → *that same text*"
   again as its own node/edge would just repeat it, and a subject can legitimately carry several
@@ -620,11 +621,26 @@ interactive view (drag nodes, expand further, ...) in a browser tab whenever tha
   these two generic predicates to the exact same object, and `fetch_triples()` has no way to tell
   an inferred triple from an asserted one — without this exclusion, every single edge in the
   diagram would draw up to three times over (once for its own real predicate, once each for these
-  two generic ones). Redrawing on a pane resize (`<Configure>`) reuses the already-fetched data
+  two generic ones).
+
+  **`sem:hasActor`/`hasPlace`/`hasTime` are a related but different case** — unlike the two
+  generic ancestors above, these DO carry real meaning (they're SEM's own role vocabulary), so
+  rather than dropping them outright, `_merge_equivalent_edges()`
+  (`EDGE_EQUIVALENCE_GROUPS` — one group each for the agent-like roles `agent`/`agent_patient`/
+  `participant`/`experiencer` + `hasActor`, for `location` + `hasPlace`, and for the four
+  `time/*` variants + `hasTime`) collapses each one down to a SINGLE edge with whichever real
+  `n2mu:` predicate shares the same object, instead of excluding it. The same RDFS/OWL inference
+  that materializes `sem:eventProperty`/`eps:contextProperty` copies also materializes these —
+  e.g. an `n2mu:agent -> "Jan"` triple gets an `sem:hasActor -> "Jan"` copy too — so without
+  merging them, "Jan" would draw as two (or three, if `agent_patient` is also present) separate
+  near-identical edges for what's really one fact. The first matching predicate actually present
+  for a given object is what the merged edge is labeled with, so a real, specific `n2mu:`
+  predicate always wins over its own generic `sem:` copy.
+
+  Redrawing on a pane resize (`<Configure>`) reuses the already-fetched data
   (`self._graph_center_label`/`self._graph_center_uri`/`self._graph_triples` — the *raw*,
-  unfiltered set; all three exclusions are re-applied on every redraw, not dropped from the
-  cache) —
-  no extra network round-trip just to re-lay-out the same graph at a new size.
+  unfiltered set; every exclusion/merge above is re-applied on every redraw, not dropped from the
+  cache) — no extra network round-trip just to re-lay-out the same graph at a new size.
 - **Node colors, by RDF namespace** (`_namespace_of()`/`_node_fill_color()`) — red for `n2mu`,
   blue for `gaf`, green for `grasp` (`NAMESPACE_COLORS`, this project's own ontology's three
   namespaces — see `cltl.brain.infrastructure.rdf_builder._define_namespaces()`; `grasp` also

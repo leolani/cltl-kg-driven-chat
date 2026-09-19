@@ -212,12 +212,19 @@ class Instruct():
         instruct = {"role": "system", "content": "You are an intelligent assistant. \
          I will give you a question that was asked, and the person's reply to it. Classify the \
          reply as exactly one of: \
-         ANSWER: <value> -- the person answered the question; <value> is that answer, stated as \
-         briefly and literally as possible in a few words, e.g. \"ANSWER: yoghurt with fresh fruit\". \
-         DECLINE -- the person indicated they don't have, didn't do, or don't know this (e.g. no, \
-         nothing, not really, I don't know). \
+         ANSWER: <value> -- the reply gives ANY concrete information that answers the question, \
+         even if it's brief, informally phrased, or contains typos (e.g. \"Coupld of days\" IS an \
+         answer to \"how long\" -- treat it as ANSWER: a couple of days, do not let a typo or \
+         casual phrasing make you classify it as DECLINE or UNRELATED); <value> is that answer, \
+         corrected for obvious typos, stated as briefly and literally as possible in a few words, \
+         e.g. \"ANSWER: yoghurt with fresh fruit\". \
+         DECLINE -- the person EXPLICITLY indicated they don't have, didn't do, or don't know this \
+         -- only for a clear negative like no, nothing, not really, I don't know, none -- never \
+         for a reply that actually contains an answer, however short. \
          UNRELATED -- the reply does not answer or decline the question at all -- e.g. it asks a \
          clarifying question back, or changes the subject. \
+         When genuinely unsure between ANSWER and DECLINE, prefer ANSWER -- a wrong DECLINE \
+         silently throws away real information the person just gave you. \
          Respond with exactly one line, exactly one of these three forms, and nothing else -- \
          no explanation, no extra punctuation."
                }
