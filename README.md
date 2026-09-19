@@ -770,13 +770,25 @@ SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by `kg_catchup_
      stopping with no closing turn, it tells the LLM what was actually covered this session and
      lets it decide for itself — continue with a short question if there's an obvious thread left,
      or wrap up warmly and say goodbye. Sets `self.wrapped_up` so it never fires a second time.
+     Takes `messages` (the real running conversation — see `RECENT_CONTEXT_MESSAGES`) as context,
+     and its own system prompt explicitly weighs the human's OWN last message over the
+     "everything's covered" framing — a real session once had the human type "What's next?"
+     right before this ran and got a goodbye anyway, because without either of those it had no
+     way to notice that message at all.
+   - **`recap_message(...)`** — answers an explicit "tell me what we discussed [previously]" (or
+     any paraphrase — see `_is_recap_request()`, a small dedicated LLM classifier, the same
+     pattern `KgChatSession._classify_confirmation_reply()` already uses) with a natural summary
+     of which topics have actually been covered this session versus which are still open. A pure
+     read — doesn't touch `self.asked`/`self.reported`/anything else, since being asked to recap
+     isn't itself another catch-up question.
 4. **`wrap_agent_fn_with_saturation_loop(agent_fn, tracker)`** — wraps a plain `agent_fn` so that
    every call to it (which `KgChatSession.say()` only ever makes once it's found no per-turn
-   intent gap left to ask about — the `"default"` `reply_sources` case) asks about the next
-   under-covered topic instead, for as long as `tracker.is_saturated()` is False; the first time
-   every topic is saturated (or capped out), `tracker.wrap_up_message()` runs once instead of
-   silently falling through; after that (`tracker.wrapped_up`), every call goes straight through
-   to `agent_fn` unchanged.
+   intent gap left to ask about — the `"default"` `reply_sources` case) first checks whether the
+   human's own last message is an explicit recap request (`tracker.recap_message()` answers it
+   directly, ahead of everything else); otherwise asks about the next under-covered topic, for as
+   long as `tracker.is_saturated()` is False; the first time every topic is saturated (or capped
+   out), `tracker.wrap_up_message()` runs once instead of silently falling through; after that
+   (`tracker.wrapped_up`), every call goes straight through to `agent_fn` unchanged.
 
 The loop this produces: **ask about a gap-period topic** (`next_question()`) → whatever the human
 reports is handled entirely by `KgIntentChatSession`'s own *existing* per-turn flow, completely

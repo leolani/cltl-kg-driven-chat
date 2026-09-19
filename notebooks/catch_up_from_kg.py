@@ -56,11 +56,15 @@ Module contents:
 - SaturationTracker -- holds those targets plus how many of each topic have actually been
   reported LIVE this session (self.reported, updated via record_new_activity()), decides what's
   still worth asking about (next_question()) and when the whole loop is done (is_saturated()).
-  Also builds the very first turn (opening_question()).
+  Also builds the very first turn (opening_question()), the one-time wrap-up
+  (wrap_up_message()), and answers an explicit "what have we discussed?" (recap_message()) --
+  see _is_recap_request().
 - wrap_agent_fn_with_saturation_loop() -- the ONLY integration point with chat_sessions.py: wraps
   a plain agent_fn so a still-unsaturated topic's question is asked instead of the plain default
-  reply, until SaturationTracker.is_saturated(). Nothing in chat_sessions.py needs to change for
-  THIS -- agent_fn is already a pluggable constructor parameter of every ChatSession -- but
+  reply, until SaturationTracker.is_saturated() (at which point wrap_up_message() runs once), and
+  so an explicit recap request (_is_recap_request()) is answered directly, ahead of both, without
+  touching any tracker state. Nothing in chat_sessions.py needs to change for THIS -- agent_fn is
+  already a pluggable constructor parameter of every ChatSession -- but
   SaturationTracker.record_new_activity() needs to be told about every new activity as it's
   pushed, which DOES need one small, additive hook: chat_sessions.KgChatSession's own
   `on_new_subject` constructor parameter (see its docstring), called exactly once per genuinely
@@ -351,6 +355,49 @@ def _wrap_up_system_prompt(human: str) -> str:
     )
 
 
+def _recap_system_prompt(human: str) -> str:
+    """System prompt for SaturationTracker.recap_message() -- like _wrap_up_system_prompt(), a
+    moment this module's own reply is allowed to be a plain statement rather than a question: the
+    human explicitly asked for a recap, so answering with one is exactly right, not "only ever
+    ask a question" (_catch_up_system_prompt()'s own restriction, for every OTHER catch-up
+    reply)."""
+    return (
+        f"You are a lifestyle coach talking with {human}, a person with Type 2 diabetes. They "
+        "just asked you to recap what's been discussed. Give a short (2-3 sentence), warm, plain "
+        "summary of what's actually been covered. Do not give advice, recommendations, or "
+        "suggestions, and do not ask a new question unless they specifically asked you to."
+    )
+
+
+def _is_recap_request(utterance: str, agent_fn=None, model: str = DEFAULT_MODEL) -> bool:
+    """True if `utterance` (the human's own last message) is asking for a recap of what's been
+    discussed -- "tell me what we discussed previously", "what did we talk about?", "can you
+    remind me what we've covered?", or any other paraphrase of that same request -- as opposed to
+    reporting something new, answering a question, or anything else.
+
+    A single, cheap LLM classification call, mirroring
+    chat_sessions.KgChatSession._classify_confirmation_reply()'s own "small dedicated classifier"
+    pattern -- matching a fixed set of literal phrasings would miss most real paraphrases, which
+    is exactly the case this function exists to handle (see wrap_agent_fn_with_saturation_loop(),
+    the only caller)."""
+    if not utterance or not utterance.strip():
+        return False
+    messages = [
+        {"role": "system", "content": (
+            "You are a classifier. Decide whether the person's message is asking for a recap or "
+            "summary of what's been discussed in this conversation (e.g. \"tell me what we "
+            "discussed previously\", \"what did we talk about?\", \"can you remind me what we've "
+            "covered?\", or any other paraphrase of that same request) -- as opposed to reporting "
+            "something new, answering a question, or anything else. Respond with exactly one "
+            "word: YES or NO."
+        )},
+        {"role": "user", "content": utterance},
+    ]
+    reply_fn = agent_fn or _default_reply_fn(model)
+    raw = (_call_openai("checking whether you're asking for a recap", reply_fn, messages) or "")
+    return raw.strip().upper().startswith("YES")
+
+
 def _format_gap_description(current_date: datetime, recent_date: datetime) -> str:
     """A human-ish phrase for how long it's been since `recent_date` -- "yesterday", "3 days
     ago, on Tuesday", etc. -- for the LLM prompts below."""
@@ -567,6 +614,41 @@ class SaturationTracker:
         reply_fn = agent_fn or _default_reply_fn(self.model)
         return _call_openai("wrapping up the catch-up conversation", reply_fn, prompt)
 
+    def recap_message(self, messages: Optional[List[Dict]] = None, agent_fn=None) -> str:
+        """Answer an explicit "tell me what we discussed [previously]" (or any paraphrase -- see
+        _is_recap_request()) with a natural-language summary of the catch-up topics: which ones
+        were identified as worth covering for this period (self.targets, set once at
+        construction from find_catch_up_topics()'s own output) versus which of those have
+        actually been covered so far THIS session (self.reported) and which are still open
+        (short of target and not yet capped out -- the same test _remaining() uses).
+
+        A pure read -- unlike next_question()/wrap_up_message(), this never changes self.asked/
+        self.wrapped_up/anything else, since answering "what have we covered" isn't itself
+        another catch-up question and shouldn't count as one, or consume one of a topic's own
+        MAX_ASKS_PER_TOPIC attempts.
+        """
+        covered = [t.replace("_", " ") for t, target in self.targets.items() if self.reported[t] > 0]
+        still_open = [
+            t.replace("_", " ") for t, target in self.targets.items()
+            if self.reported[t] < target["expected_count"] and self.asked[t] < self.MAX_ASKS_PER_TOPIC
+        ]
+        covered_phrase = ", ".join(covered) if covered else "nothing yet this time"
+        open_phrase = ", ".join(still_open) if still_open else "nothing else"
+        user_prompt = (
+            f"The person just asked for a recap of what's been discussed. So far this "
+            f"conversation you've covered: {covered_phrase}. Still worth asking about before "
+            f"you're caught up: {open_phrase}. Give them a short, natural summary of what's been "
+            f"covered so far, in plain language (no bullet points, no jargon like activity "
+            f"types)."
+        )
+        prompt = (
+            [{"role": "system", "content": _recap_system_prompt(self.human)}]
+            + _recent_context(messages)
+            + [{"role": "user", "content": user_prompt}]
+        )
+        reply_fn = agent_fn or _default_reply_fn(self.model)
+        return _call_openai("summarizing what's been discussed so far", reply_fn, prompt)
+
 
 def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     """Wrap `agent_fn` (e.g. chat_sessions.openai_agent()) so that every call to it -- which
@@ -583,8 +665,18 @@ def wrap_agent_fn_with_saturation_loop(agent_fn, tracker: SaturationTracker):
     `messages` -- the REAL running conversation, which `say()` always passes to `agent_fn` -- is
     forwarded to both `next_question()` and `wrap_up_message()` (see RECENT_CONTEXT_MESSAGES) so
     neither is generated blind to whatever the human just actually said.
+
+    Before any of that, EVERY call first checks whether the human's own last message is asking
+    for a recap ("tell me what we discussed previously", or any paraphrase -- see
+    `_is_recap_request()`); if so, `tracker.recap_message()` answers it directly, taking priority
+    over both asking a fresh question and wrapping up, and without touching any tracker state
+    (see that method's own docstring for why) -- asking to be reminded what's been covered so far
+    isn't itself another catch-up question.
     """
     def _wrapped(messages):
+        last_utterance = messages[-1]["content"] if messages else None
+        if last_utterance and _is_recap_request(last_utterance):
+            return tracker.recap_message(messages=messages)
         if not tracker.is_saturated():
             question = tracker.next_question(messages=messages)
             if question is not None:
