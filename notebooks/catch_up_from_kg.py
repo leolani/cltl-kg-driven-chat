@@ -501,43 +501,64 @@ class SaturationTracker:
         self.asked[activity_type] += 1
         self.asked_log.append({"activity_type": activity_type, "attempt": self.asked[activity_type]})
 
-    def opening_question(self, current_date: datetime, recent_date: datetime, lead_topics: int = 2,
+    def _select_topic(self) -> Optional[str]:
+        """Whichever still-unsaturated topic (see _remaining()) has the biggest shortfall
+        (expected_count - reported so far), tie-broken by most-recently-discussed -- or None once
+        every topic is saturated or capped out. The one selection rule opening_question() and
+        next_question() both use to pick which SINGLE topic to actually ask about next."""
+        remaining = self._remaining()
+        if not remaining:
+            return None
+        remaining.sort(key=lambda t: (
+            -(self.targets[t]["expected_count"] - self.reported[t]),
+            -self.targets[t]["latest_date"].timestamp(),
+        ))
+        return remaining[0]
+
+    def opening_question(self, current_date: datetime, recent_date: datetime,
                           agent_fn=None) -> str:
-        """The very first agent turn: names how long it's been since the last conversation and
-        invites `self.human` to share what's happened since, naming the `lead_topics` topics with
-        the biggest shortfall (see _remaining()'s own ordering) as concrete memory prompts -- e.g.
-        "how's your exercise routine and your sleep been?" -- rather than a bare, generic "what's
-        new?". Marks those `lead_topics` topics as asked once (_mark_asked()) so next_question()
-        doesn't immediately ask about them again right after the opening line already did.
+        """The very first agent turn, in two parts, in this order -- see this module's own
+        docstring: (1) how long it's been since the last conversation, followed by a SUMMARY of
+        every topic (`self.targets`, this human's own full catch-up list, not just a couple of
+        "lead" ones) talked about back then, and only THEN (2) a single, specific question about
+        whichever ONE topic most needs catching up on (`_select_topic()` -- the exact same
+        selection `next_question()` uses), rather than a bare, generic "what's new?". Marks that
+        one topic as asked (`_mark_asked()`) so `next_question()` doesn't immediately ask about it
+        again right after the opening turn already did.
+
+        If there's nothing left to ask about at all (e.g. every topic is already covered by data
+        pushed through some other channel before this chat even starts), the message still names
+        every topic recapped from last time, just without the trailing specific question.
         """
-        remaining = sorted(
-            self._remaining(),
-            key=lambda t: (
-                -(self.targets[t]["expected_count"] - self.reported[t]),
-                -self.targets[t]["latest_date"].timestamp(),
-            ),
-        )
-        lead = remaining[:lead_topics]
-        for activity_type in lead:
+        all_topics_phrase = ", ".join(t.replace("_", " ") for t in self.targets)
+        activity_type = self._select_topic()
+        specific_label = None
+        if activity_type is not None:
             self._mark_asked(activity_type)
-        topic_phrase = ", ".join(t.replace("_", " ") for t in lead)
+            specific_label = activity_type.replace("_", " ")
         user_prompt = (
             f"Our last conversation was {_format_gap_description(current_date, recent_date)}. "
-            + (f"Back then we'd talked about: {topic_phrase}. " if topic_phrase else "")
-            + "Write the opening message of today's chat: greet them, mention it's been a while "
-            "since we last talked, and ask what's happened since then"
-            + (f", specifically inviting them to update you on {topic_phrase}" if topic_phrase else "")
-            + ". Keep it natural and short."
+            + (f"Back then we talked about: {all_topics_phrase}. " if all_topics_phrase else "")
+            + "Write the opening message of today's chat, in this order: (1) greet them and "
+            "mention how long it's been since you last talked, (2) in one short sentence, "
+            "summarize the topics you talked about last time"
+            + (f" ({all_topics_phrase})" if all_topics_phrase else "")
+            + (
+                f", (3) THEN, as a separate follow-up, ask a specific question inviting them to "
+                f"share what's happened with their {specific_label} since then"
+                if specific_label else ""
+            )
+            + ". Keep it natural and short (2-3 sentences)."
         )
         messages = [
             {"role": "system", "content": _catch_up_system_prompt(self.human)},
             {"role": "user", "content": user_prompt},
         ]
         reply_fn = agent_fn or _default_reply_fn(self.model)
-        return _call_openai("generating the opening catch-up question", reply_fn, messages)
+        return _call_openai("generating the opening catch-up message", reply_fn, messages)
 
     def next_question(self, agent_fn=None, messages: Optional[List[Dict]] = None) -> Optional[str]:
-        """Ask about whichever still-unsaturated topic (see _remaining()) has the biggest
+        """Ask about whichever still-unsaturated topic (see _select_topic()) has the biggest
         shortfall (expected_count - reported so far), tie-broken by most-recently-discussed --
         or None once every topic is saturated or capped out. Phrases a FOLLOW-UP ("anything
         else...") when this topic's already been asked about before this session, instead of
@@ -546,14 +567,9 @@ class SaturationTracker:
         `messages` -- the REAL running conversation (see RECENT_CONTEXT_MESSAGES) -- is included
         as context ahead of the instruction when given, so the question reacts to what the human
         actually just said instead of being generated in isolation from it."""
-        remaining = self._remaining()
-        if not remaining:
+        activity_type = self._select_topic()
+        if activity_type is None:
             return None
-        remaining.sort(key=lambda t: (
-            -(self.targets[t]["expected_count"] - self.reported[t]),
-            -self.targets[t]["latest_date"].timestamp(),
-        ))
-        activity_type = remaining[0]
         target = self.targets[activity_type]
         is_followup = self.asked[activity_type] > 0
         self._mark_asked(activity_type)

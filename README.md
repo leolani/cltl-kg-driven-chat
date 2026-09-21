@@ -750,10 +750,12 @@ SPARQL layer, not `kg_gap_finder.py`'s rdflib one) — used only by `kg_catchup_
    *live* this session (seeded from `initial_reported_count`, updated via
    `record_new_activity(subject_uri, activity_type)` — matching `on_new_subject`'s own signature
    exactly, see below, so it can be passed straight through as-is):
-   - **`opening_question(...)`** — one LLM call phrasing the actual first turn: how long it's
-     been, inviting the human to share what's happened, naming the `lead_topics` (default 2)
-     topics with the biggest shortfall as concrete memory prompts — and marks those as asked once,
-     so the loop below doesn't immediately repeat them.
+   - **`opening_question(...)`** — one LLM call phrasing the actual first turn, in this order:
+     (1) how long it's been since the last conversation, (2) a one-sentence summary of *every*
+     topic talked about back then (not just a couple of "lead" ones), and only *then* (3) a
+     single, specific question about whichever ONE topic most needs catching up on
+     (`_select_topic()` — the same selection `next_question()` uses) — marked as asked once, so
+     the loop below doesn't immediately repeat it.
    - **`next_question()`** — asks about whichever still-*unsaturated* topic (short of its own
      `expected_count`, and not yet at the per-topic ask cap) has the biggest shortfall, rephrased
      as a natural follow-up ("anything else...") once a topic's already been asked about before,
@@ -821,7 +823,7 @@ kg_session = KgIntentChatSession(
     chat=1, human="Mehmet", kg_address=KG_ADDRESS, agent_fn=agent_fn,
     on_new_subject=tracker.record_new_activity,
 )
-opening_question = tracker.opening_question(CURRENT_DATE, last_date, lead_topics=2)
+opening_question = tracker.opening_question(CURRENT_DATE, last_date)
 kg_session.open_with(opening_question)
 
 # ... run the chat, then:
