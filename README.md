@@ -55,6 +55,7 @@ notebook's own `input()` prompt.
 - [Catch-up opening flow: `catch_up_from_kg.py`](#catch-up-opening-flow-catch_up_from_kgpy)
 - [Setup](#setup)
 - [Known rough edges](#known-rough-edges)
+- [References](#references)
 
 ## Quick start
 
@@ -998,3 +999,35 @@ reasoning enabled.
   activities` defaults off and `self._opened_subject_uris` is a fresh, in-memory, per-window set
   either way, so a closed and reopened window has forgotten what it already auto-opened; turning
   the option back on there can re-open a browser tab for an activity it already opened before.
+
+## References
+
+- Vossen, P., Báez Santamaría, S., & Baier, T. (2024). A conversational agent for structured
+  diary construction enabling monitoring of functioning & well-being. In *HHAI 2024: Hybrid
+  Human AI Systems for the Social Good: Proceedings of the Third International Conference on
+  Hybrid Human-Artificial Intelligence* (pp. 315–324). 1 Oliver's Yard, 55 City Road, London,
+  EC1Y 1SP: SAGE Publications.
+- Ntanavaras, S., de Boer, M., & Vossen, P. (2026, May). A synthetic conversational dataset for
+  Type 2 diabetes management. In *Proceedings of the Third Workshop on Patient-Oriented Language
+  Processing (CL4Health) @ LREC 2026* (pp. 171–181).
+
+```bibtex
+@inproceedings{vossen2024conversational,
+  author    = {Vossen, P. and B{\'a}ez Santamar{\'i}a, S. and Baier, T.},
+  title     = {A Conversational Agent for Structured Diary Construction Enabling Monitoring of Functioning \& Well-being},
+  booktitle = {HHAI 2024: Hybrid Human AI Systems for the Social Good: Proceedings of the Third International Conference on Hybrid Human-Artificial Intelligence},
+  pages     = {315--324},
+  year      = {2024},
+  address   = {1 Oliver's Yard, 55 City Road, London, EC1Y 1SP},
+  publisher = {SAGE Publications}
+}
+
+@inproceedings{ntanavaras2026synthetic,
+  author    = {Ntanavaras, S. and de Boer, M. and Vossen, P.},
+  title     = {A Synthetic Conversational Dataset for Type 2 Diabetes Management},
+  booktitle = {Proceedings of the Third Workshop on Patient-Oriented Language Processing (CL4Health) @ LREC 2026},
+  pages     = {171--181},
+  month     = may,
+  year      = {2026}
+}
+```
