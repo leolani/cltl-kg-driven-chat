@@ -358,8 +358,9 @@ same question, verbatim or reworded, could repeat indefinitely. Two mechanisms f
   gap deliberately never gets one). Asking such a gap arms `self._pending_intent_answer`, so the
   human's very next reply is classified (`get_prompt_for_intent_answer_response()`) as one of:
   - **ANSWER: \<value\>** — pushed directly onto the pending gap's own subject/role
-    (`_push_gap_triple()`), skipping the general extractor entirely, then acknowledged.
-  - **DECLINE** — nothing pushed; acknowledged and dropped, not re-asked.
+    (`_push_gap_triple()`), skipping the general extractor entirely, then acknowledged and
+    continued (`_continue_after_ack()` — see below).
+  - **DECLINE** — nothing pushed; acknowledged, dropped (not re-asked), and continued the same way.
   - **UNRELATED** — e.g. a clarifying question back ("what body function?") — falls through to
     the ordinary annotate-and-push/gap-finding flow, exactly as if there had been no pending
     answer at all.
@@ -369,6 +370,26 @@ same question, verbatim or reworded, could repeat indefinitely. Two mechanisms f
   been surfaced this chat. Once that hits `MAX_INTENT_GAP_ATTEMPTS` (2), the intent gives up on it
   silently for the rest of the session (logged as `gave_up: True` in `turn_log`'s `gap_queries`
   entries) — the safety net for whatever the classifier above still gets wrong.
+
+### Why an acknowledgement doesn't end the conversation
+
+A bare acknowledgement — "Got it, thanks!" (an ANSWER) or "No worries, thanks for letting me
+know." (a DECLINE, see above; the same applies to `_handle_confirmation_reply()`'s confirm/
+deny_correct acks) — used to be the ENTIRE reply for that turn. Nothing about it invited the human
+to keep going, so the conversation only continued once they happened to say something new on
+their own; from their side, that reads as the agent simply having stopped.
+
+`KgChatSession._continue_after_ack(ack)` fixes this: right after building any of those four acks,
+it calls `self.agent_fn(self._messages)` directly — the exact same call `say()` would otherwise
+make once a turn falls through to the `"default"` reply case — and appends whatever comes back to
+the acknowledgement, so the reply is never *just* an ack. For a `KgIntentChatSession` whose
+`agent_fn` is `catch_up_from_kg.wrap_agent_fn_with_saturation_loop()`, that immediately surfaces
+the next still-uncovered catch-up topic (or nothing extra, once every topic really is covered and
+`wrap_up_message()` has already run) instead of waiting for another turn to notice. For a plain
+`agent_fn` it's simply the ordinary default reply — harmless, and keeps any chat moving the same
+way. A timeout getting the follow-up is swallowed (logged, not raised) rather than discarding an
+already-valid acknowledgement or surfacing a scary error for what the human experiences as an
+answer that already went through fine.
 
 ## `notebooks/` — putting it together
 
@@ -927,18 +948,22 @@ reasoning enabled.
   so a gap the graph still lacks a value for can resurface, and `MAX_INTENT_GAP_ATTEMPTS`'s count
   restarts from zero, even though it was asked (and denied-without-correction, or already given up
   on) in an earlier session.
-- **A confirmation turn costs two extra LLM calls** on top of the usual per-turn ones: one to
+- **A confirmation turn costs three extra LLM calls** on top of the usual per-turn ones: one to
   classify the reply (`get_prompt_for_confirmation_response`), one to phrase the acknowledgement
-  or fallback question. `_push_gap_triple` also always types a confirmed/corrected agent as
-  `RoleType.person` — reasonable for "my son"/"my daughter"-style corrections, but not checked
-  against what the correction actually says. `_handle_intent_answer_reply()`'s generalized version
-  (see [Why the same question doesn't repeat](#why-the-same-question-doesnt-repeat)) costs the same
-  two extra calls, and its own classifier is a single LLM call with no retry — a reply it
-  misclassifies as UNRELATED just falls through to the ordinary extractor (no worse than before
-  this feature existed), but one misclassified as ANSWER pushes whatever value it extracted
-  as-is, unchecked against the gap's own expected type. `MAX_INTENT_GAP_ATTEMPTS` (2) is a module
-  constant, not yet a constructor parameter — change it in `chat_sessions.py` directly if a
-  different chat needs a different cap.
+  or fallback question, and — for a confirm/deny_correct ack specifically — one more for
+  `_continue_after_ack()`'s own follow-up (see [Why an acknowledgement doesn't end the
+  conversation](#why-an-acknowledgement-doesnt-end-the-conversation)). `_push_gap_triple` also
+  always types a confirmed/corrected agent as `RoleType.person` — reasonable for "my son"/"my
+  daughter"-style corrections, but not checked against what the correction actually says.
+  `_handle_intent_answer_reply()`'s generalized version (see [Why the same question doesn't
+  repeat](#why-the-same-question-doesnt-repeat)) costs the same three extra calls for an
+  answer/decline ack (two for an unrelated reply, which never reaches `_continue_after_ack()`),
+  and its own classifier is a single LLM call with no retry — a reply it misclassifies as
+  UNRELATED just falls through to the ordinary extractor (no worse than before this feature
+  existed), but one misclassified as ANSWER pushes whatever value it extracted as-is, unchecked
+  against the gap's own expected type. `MAX_INTENT_GAP_ATTEMPTS` (2) is a module constant, not
+  yet a constructor parameter — change it in `chat_sessions.py` directly if a different chat
+  needs a different cap.
 - **An intent's `activity_types`/`activity_labels` must match the graph's own spelling exactly**
   (after `intent_gap_finder._normalize()`'s case/`-`/`_`/space folding) — an `intents/*.json` file
   covering a real `data_type.ActivityType` value under a slightly different spelling silently

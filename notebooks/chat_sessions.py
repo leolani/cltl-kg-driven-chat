@@ -17,6 +17,7 @@ any of that.
 import json
 import os
 from datetime import datetime
+from pathlib import Path
 
 import openai
 from openai import OpenAI
@@ -288,6 +289,11 @@ def simulate_chat(chat, human, human_utterances, date=None, agent_fn=None, syste
 
 
 def save_turns(turns: list, path: str) -> None:
+    """Write `turns` as JSON to `path`, creating its parent directory first if it doesn't exist
+    yet (e.g. `path="intents_log/kg_intent_turns.json"` when nothing has created `intents_log/`
+    on this run yet -- a bare filename's parent is `.`, so this is a no-op in that case, same as
+    before)."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w") as f:
         json.dump(turns, f, indent=2)
     print(f"Wrote {len(turns)} turns to {path}")
@@ -934,14 +940,48 @@ class KgChatSession(ChatSession):
         triples_pushed = [{"subject": activity_id, "predicate": role_name, "object": role_value}]
         return summary, triples_pushed
 
+    def _continue_after_ack(self, ack: str) -> str:
+        """Append a natural, forward-driving follow-up after a bare acknowledgement (see
+        _handle_confirmation_reply()'s confirm/deny_correct branches and
+        _handle_intent_answer_reply()'s answer/decline branches) by calling self.agent_fn
+        directly -- the exact same call say() would otherwise make once a turn falls through to
+        the "default" reply case, just made explicitly here so an acknowledgement is never the
+        WHOLE reply with nothing to keep the conversation moving.
+
+        This is what fixes a real failure mode: without it, a reply like "Thanks for letting me
+        know" (a plain decline ack) was the entire turn, and the conversation only continued once
+        the human happened to say something new on their own -- which, from their side, looked
+        like the agent had simply stopped. For a KgIntentChatSession whose agent_fn is
+        catch_up_from_kg.wrap_agent_fn_with_saturation_loop(), calling it here immediately surfaces
+        the NEXT still-uncovered catch-up topic (or nothing extra, once every topic really is
+        covered) instead of waiting for another turn to notice. For a plain agent_fn it's simply
+        the ordinary default reply -- harmless, and keeps any chat moving the same way.
+
+        A timeout getting the follow-up is swallowed (logged, not raised) -- the acknowledgement
+        itself is already valid and worth keeping; losing the bonus continuation on a slow request
+        isn't worth discarding it or surfacing a scary timeout message for what is, from the
+        human's point of view, an answer that already went through fine."""
+        try:
+            followup = _call_openai("continuing the conversation", self.agent_fn, self._messages)
+        except ChatTimeoutError:
+            print("[KgChatSession] timed out generating a follow-up after the acknowledgement -- "
+                  "keeping the acknowledgement alone for this turn.")
+            return ack
+        followup = (followup or "").strip()
+        if not followup or followup == ack:
+            return ack
+        return f"{ack} {followup}"
+
     def _handle_confirmation_reply(self, human_turn: dict) -> str:
         """Handle the human's answer to self._pending_confirmation (armed by _reply_from_gaps()):
           - confirm -> push the originally-assumed triple (subject, predicate, self.human) to
-            the KG, filling the gap, and acknowledge.
-          - deny + correction (both in the same reply) -> push the CORRECTED triple instead, and
-            acknowledge.
+            the KG, filling the gap, acknowledge, and continue (_continue_after_ack()) -- never
+            just the bare acknowledgement alone.
+          - deny + correction (both in the same reply) -> push the CORRECTED triple instead,
+            acknowledge, and continue the same way.
           - deny, no correction -> push nothing; fall back to the open (non-confirmation)
-            question for the same gap, so the human can just answer it directly next.
+            question for the same gap, so the human can just answer it directly next (already
+            forward-driving on its own -- no _continue_after_ack() needed here).
 
         If classifying the reply times out, self._pending_confirmation is restored (the human's
         answer was never actually read) before the ChatTimeoutError propagates to say(), so a
@@ -974,14 +1014,16 @@ class KgChatSession(ChatSession):
                 gap, role_value="I", role_type="person", human_turn=human_turn
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, self.human)
-            return _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
+            ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
+            return self._continue_after_ack(ack)
 
         if verdict == "deny_correct":
             _, self._pending_triples_pushed = self._push_gap_triple(
                 gap, role_value=correction, role_type="person", human_turn=human_turn
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, correction)
-            return _call_openai("acknowledging your correction", self.replier.reply, ack_prompt)
+            ack = _call_openai("acknowledging your correction", self.replier.reply, ack_prompt)
+            return self._continue_after_ack(ack)
 
         # Plain denial, no usable correction -- ask the open question instead (no `human=`, so
         # get_prompt_for_kg_gap() does NOT take the confirmation branch this time).
@@ -1024,17 +1066,19 @@ class KgChatSession(ChatSession):
         to the pending gap's own subject instead of relying on the general-purpose SRL extractor
         to coreference a short follow-up reply back to it) to any what/how much/where
         requirement, not just a who one:
-          - answer -> push the value onto the gap's own "fill_role" (see _push_gap_triple()) and
+          - answer -> push the value onto the gap's own "fill_role" (see _push_gap_triple()),
             acknowledge (get_prompt_for_gap_filled_ack(), the same one the confirmation flow
-            uses).
-          - decline -> push nothing, drop the requirement, and acknowledge that instead of asking
-            again (get_prompt_for_gap_declined_ack()) -- unlike a plain agent-confirmation denial,
-            this deliberately does NOT fall back to re-asking the same question: a generic
-            what/how much/where requirement has no better "who" pivot to ask instead, and
-            re-asking it immediately is exactly the repeated-question failure mode this whole
-            mechanism exists to avoid (see KgIntentChatSession's own MAX_INTENT_GAP_ATTEMPTS
-            backstop for the belt-and-braces version of this, covering the cases this classifier
-            itself might still get wrong).
+            uses), and continue (_continue_after_ack()) rather than stopping at the bare ack.
+          - decline -> push nothing, drop the requirement, acknowledge that instead of asking
+            again (get_prompt_for_gap_declined_ack()), and continue the same way
+            (_continue_after_ack()) -- a bare "no worries, thanks for letting me know" with
+            nothing after it is exactly what used to make the conversation look like it had
+            simply stopped, even though say() was still working correctly turn to turn. Unlike a
+            plain agent-confirmation denial, this deliberately does NOT fall back to re-asking the
+            SAME question: a generic what/how much/where requirement has no better "who" pivot to
+            ask instead -- _continue_after_ack() is what supplies a genuinely NEW thread instead
+            (see KgIntentChatSession's own MAX_INTENT_GAP_ATTEMPTS backstop for the belt-and-braces
+            version of this, covering the cases this classifier itself might still get wrong).
           - unrelated -> push nothing, ask nothing here; returns (False, None) so say() runs the
             turn through the normal annotate-and-push/gap-finding flow instead, exactly as if
             there had been no pending intent answer at all (e.g. "what body function?" -- a
@@ -1069,13 +1113,15 @@ class KgChatSession(ChatSession):
                 role_name=gap["fill_role"],
             )
             ack_prompt = self.replier._processor.get_prompt_for_gap_filled_ack(gap, value)
-            return True, _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
+            ack = _call_openai("acknowledging your answer", self.replier.reply, ack_prompt)
+            return True, self._continue_after_ack(ack)
 
         if verdict == "decline":
             ack_prompt = self.replier._processor.get_prompt_for_gap_declined_ack(gap)
-            return True, _call_openai(
+            ack = _call_openai(
                 "acknowledging that you don't have this", self.replier.reply, ack_prompt
             )
+            return True, self._continue_after_ack(ack)
 
         return False, None
 
