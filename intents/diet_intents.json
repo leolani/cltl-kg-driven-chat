@@ -1,7 +1,7 @@
 [{
   "activity_types": ["take_food"],
   "patient_type": ["food"],
-  "patient_question": "What do you have for {activity}?",
+  "patient_question": "What did you have for {activity}?",
   "activity_date": "date",
   "date_question": "When did you have your {activity}",
   "secondary_objectives": {
@@ -12,7 +12,7 @@
 {
   "activity_types": ["take_drink"],
   "patient_type": ["drink"],
-  "patient_question": "What do you have for {activity}?",
+  "patient_question": "What did you have for {activity}?",
   "activity_date": "date",
   "date_question": "When did you have your {activity}",
   "secondary_objectives": {
