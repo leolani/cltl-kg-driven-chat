@@ -3,6 +3,10 @@
     "activity_types": ["symptom"],
     "activity_labels": ["blurry vision"],
     "activity_qualification": ["duration", "degree"],
+    "qualification_question": {
+      "duration": "How long do you experience {activity}?",
+      "degree": "How much do you experience {activity}?"
+    },
     "secondary_objectives": {
       "activity_date": "date"
     }
